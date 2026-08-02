@@ -115,7 +115,7 @@ Melo 提供开放模型层。识别与生成是一等能力，可插拔，可本
 > Melo 正在成形中。首个可运行版本将随公开 Alpha 发布。
 
 ```bash
-git clone https://github.com/Yuan-Man/Melo.git
+git clone https://github.com/Yuan-ManX/Melo.git
 cd Melo
 # 快速上手指南将随首个公开发布版本一同提供。
 ```
