@@ -1,5 +1,8 @@
 <div align="center">
-<img src="./assets/melo-logo.png" alt="Melo Logo">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/Melo-Logo.svg">
+  <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="380">
+</picture>
 
 **AI 原生的语音智能体。**
 
