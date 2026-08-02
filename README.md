@@ -1,7 +1,7 @@
 <div align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/Melo-Logo.svg">
-  <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="380">
+  <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="260">
 </picture>
 
 **The AI-Native Voice Agent.**
