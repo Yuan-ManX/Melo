@@ -6,14 +6,14 @@
 
 Where voice is not a feature layered onto text — but the very foundation the agent is built from. A new paradigm where listening, thinking, and speaking converge into one continuous loop, and where presence replaces screens.
 
-![License](https://img.shields.io/badge/license-MIT-000000?style=flat-square)
-![Platform](https://img.shields.io/badge/platform-Web%20%C2%B7%20Desktop%20%C2%B7%20Mobile-000000?style=flat-square)
-![AI](https://img.shields.io/badge/AI-Voice%20Native-000000?style=flat-square)
-![Status](https://img.shields.io/badge/status-forming-000000?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Stars](https://img.shields.io/github/stars/Yuan-ManX/Melo?style=social)
 
 [Melo](#what-is-melo) · [Innovation](#innovation) · [Features](#features) · [Models](#voice-models) · [Studio](#creation-studio) · [Use Cases](#use-cases) · [Quickstart](#quick-start) · [Philosophy](#philosophy)
 
 #### [English](./README.md) | [中文文档](./README_CN.md)
+
 </div>
 
 ---
