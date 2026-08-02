@@ -115,7 +115,7 @@ A runtime for voice-native agents. Bring your own models, tools, MCP servers, an
 > Melo is under active formation. The first runnable build will land with the public alpha.
 
 ```bash
-git clone https://github.com/Yuan-Man/Melo.git
+git clone https://github.com/Yuan-ManX/Melo.git
 cd Melo
 # Quickstart arrives with the first public release.
 ```
