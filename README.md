@@ -2,6 +2,7 @@
 <img src="./assets/melo-logo.png" alt="Melo Logo">
 
 **The AI-Native Voice Agent.**
+
 **Speak. Create. Belong.**
 
 Where voice is not a feature layered onto text — but the very foundation the agent is built from. A new paradigm where listening, thinking, and speaking converge into one continuous loop, and where presence replaces screens.
