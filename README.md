@@ -1,10 +1,12 @@
 <div align="center">
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/Melo-Logo.svg">
   <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="220">
 </picture>
 
-**The AI-Native Voice Agent.**
+
+**The AI-Native Voice Agent. Your Intimate Voice Buddy!**
 
 **Speak. Create. Belong.**
 
@@ -20,13 +22,13 @@ Where voice is not a feature layered onto text — but the very foundation the a
 
 </div>
 
----
+
 
 > Voice is the shortest distance between human and machine.
 > Melo dissolves the screen, letting intelligence live in sound —
 > always present, always listening, always in flow.
 
----
+
 
 ## What is Melo?
 
