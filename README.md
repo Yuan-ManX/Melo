@@ -5,6 +5,7 @@
   <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="220">
 </picture>
 
+# Melo
 
 **The AI-Native Voice Agent. Your Intimate Voice Buddy!**
 
