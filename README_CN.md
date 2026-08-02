@@ -5,6 +5,7 @@
   <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="220">
 </picture>
 
+# Melo
 
 **AI 原生的语音智能体，专属你的亲密语音搭子！**
 
