@@ -1,10 +1,12 @@
 <div align="center">
+  
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/Melo-Logo.svg">
   <img src="./assets/Melo-Logo.svg" alt="Melo Logo" width="220">
 </picture>
 
-**AI 原生的语音智能体。**
+
+**AI 原生的语音智能体。专属你的亲密语音搭子！**
 
 **说即所创，声即所在。**
 
@@ -20,13 +22,13 @@
 
 </div>
 
----
+
 
 > 语音，是人与机器之间最短的距离。
 > Melo 让屏幕消融，让智能栖息于声音之中——
 > 始终在场，始终倾听，始终流动。
 
----
+
 
 ## 什么是 Melo？
 
