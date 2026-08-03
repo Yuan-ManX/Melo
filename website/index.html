@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Melo — The AI-Native Voice Agent</title>
+<meta name="description" content="Melo is the AI-native voice agent. Speak. Create. Belong. A voice-native runtime where listening, thinking, and speaking converge into one continuous loop, and presence replaces screens." />
+<link rel="icon" type="image/svg+xml" href="assets/Melo-Logo.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:ital,opsz,wght@1,9..144,300;1,9..144,400;1,9..144,500;1,9..144,600&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Persistent voice ribbon — the continuous voice stream flowing through the page -->
+<svg class="voice-ribbon" id="voiceRibbon" aria-hidden="true" preserveAspectRatio="none">
+  <path id="ribbonPath" d="" />
+  <path id="ribbonPath2" d="" />
+</svg>
+
+<!-- ============ NAV ============ -->
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a href="#top" class="nav-logo" aria-label="Melo home">
+      <img src="assets/Melo-Logo.svg" alt="Melo" class="nav-logo-img" />
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#manifesto" data-cn-html="宣言">Manifesto</a>
+      <a href="#action" data-cn-html="语音实战">Voice in Action</a>
+      <a href="#capabilities" data-cn-html="能力">Capabilities</a>
+      <a href="#philosophy" data-cn-html="哲学">Philosophy</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-ink" href="https://github.com/Yuan-ManX/Melo" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span data-cn-html="星标">Star</span>
+      </a>
+    </div>
+    <button class="nav-burger" id="navBurger" aria-label="Toggle menu" aria-expanded="false">
+      <span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<!-- ============ HERO ============ -->
+<section class="hero" id="top">
+  <div class="hero-grain" aria-hidden="true"></div>
+  <div class="hero-glow" aria-hidden="true"></div>
+
+  <div class="hero-inner">
+    <h1 class="hero-title" data-cn-html='<span class="t-line reveal-up d1">说</span><span class="t-line reveal-up d2">创</span><span class="t-line t-serif reveal-up d3">属</span>'>
+      <span class="t-line reveal-up d1">Speak.</span>
+      <span class="t-line reveal-up d2">Create.</span>
+      <span class="t-line t-serif reveal-up d3">Belong.</span>
+    </h1>
+
+    <p class="hero-sub reveal-up d4" data-cn-html="AI 原生语音智能体。语音不是叠加在文本上的功能——它是智能体的构建基石。一个全新范式：聆听、思考与表达汇聚为一条连续的循环，在场感取代屏幕。">
+      The AI-native voice agent. Voice is not a feature layered onto text —
+      it is the foundation the agent is built from. A new paradigm where listening,
+      thinking, and speaking converge into one continuous loop, and presence replaces screens.
+    </p>
+
+    <div class="hero-cta reveal-up d5">
+      <a class="btn btn-primary btn-lg" href="#action">
+        <span data-cn-html="听它发声">Hear it speak</span>
+        <span class="btn-arrow">→</span>
+      </a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/Yuan-ManX/Melo" target="_blank" rel="noopener">
+        GitHub
+      </a>
+    </div>
+
+  </div>
+
+  <div class="hero-scroll" aria-hidden="true">
+    <span class="mono" data-cn-html="滚动语音">scroll the voice</span>
+    <span class="scroll-rail"><span class="scroll-dot"></span></span>
+  </div>
+</section>
+
+<!-- ============ MANIFESTO (What is Melo — sticky scroll storytelling) ============ -->
+<section class="section section-ink manifesto" id="manifesto">
+  <div class="container">
+    <div class="manifesto-grid">
+      <div class="manifesto-sticky">
+        <span class="mono section-kicker light" data-cn-html="— 宣言">— MANIFESTO</span>
+        <h2 class="manifesto-title" data-cn-html='语音不是你<em>添加</em>的功能。<br/>它是你<em>栖居</em>的界面。'>
+          Voice is not a feature<br/>
+          you <em>add</em>.<br/>
+          It is the interface<br/>
+          you <em>live in</em>.
+        </h2>
+      </div>
+
+      <div class="manifesto-body">
+        <p class="lead reveal-fade" data-cn-html="Melo 是一个<strong>语音原生的 AI 伙伴</strong>。语音不是附加其上的功能——它是万物构建的基底。从识别到记忆到创作，每一项能力都围绕口语对话的节奏而设计。">
+          Melo is a <strong>voice-native AI companion</strong>. Voice is not a feature bolted on top —
+          it is the substrate everything is built from. From recognition to memory to creation,
+          every capability is designed around the rhythm of spoken dialogue.
+        </p>
+
+        <p class="reveal-fade" data-cn-html="世界见过带麦克风的聊天机器人。等待唤醒词的语音助手。把语音转成文本的转录工具。但没有人构建过一个语音<em>即是</em>运行时的运行环境——对话不为思考而暂停，记忆栖居于语调与节奏之中，创作因开口而发生，而非点击。">
+          The world has seen chatbots with microphones. Voice assistants that wait for a wake word.
+          Transcription tools that turn speech into text. But no one has built a runtime where voice
+          <em>is</em> the runtime — where conversation flows without pause for thinking, where memory
+          lives in tone and cadence, where creation happens by speaking rather than clicking.
+        </p>
+
+        <blockquote class="manifesto-quote reveal-fade" data-cn-html="语音是人机之间最短的距离。Melo 消解屏幕，让智能栖居于声音——始终在场，始终聆听，始终流转。">
+          Voice is the shortest distance between human and machine. Melo dissolves the screen,
+          letting intelligence live in sound — always present, always listening, always in flow.
+        </blockquote>
+
+        <p class="reveal-fade" data-cn-html="不是一个嫁接了麦克风的聊天窗口。一个从第一性原理出发、围绕一个信念构建的平台：<strong>语音是你栖居的界面。</strong>">
+          Not a chat window with a microphone grafted on. A platform architected from first principles
+          around one conviction: <strong>voice is the interface you live in.</strong>
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ VOICE IN ACTION (immersive crystallization demo) ============ -->
+<section class="section action" id="action">
+  <div class="container">
+    <div class="section-head-center reveal-fade">
+      <span class="mono section-kicker light" data-cn-html="— 语音实战">— VOICE IN ACTION</span>
+      <h2 class="section-title light" data-cn-html='粗略地说。<br/><span class="serif-em">精致地听。</span>'>Speak it rough.<br/><span class="serif-em">Hear it polished.</span></h2>
+      <p class="section-sub light" data-cn-html="运行时聆听语音的完整韵律——停顿、填充、重述——并以语音本身的节奏进行推理。看语音结晶为意图。">
+        The runtime listens to the full cadence of speech — pauses, fillers, rewrites — and reasons
+        in the rhythm of voice itself. Watch voice crystallize into intent.
+      </p>
+    </div>
+
+    <div class="crystal-stage reveal-fade" id="crystalStage">
+      <!-- Raw voice (left) -->
+      <div class="crystal-col crystal-in">
+        <span class="crystal-label mono" data-cn-html="原始语音 · 人类">RAW VOICE · HUMAN</span>
+        <div class="crystal-stream" id="crystalIn">
+          <span class="mic-pulse" aria-hidden="true"></span>
+        </div>
+      </div>
+
+      <!-- Runtime core (center) -->
+      <div class="crystal-core" aria-hidden="true">
+        <div class="core-ring"></div>
+        <div class="core-ring core-ring-2"></div>
+        <div class="core-ring core-ring-3"></div>
+        <div class="core-orb"></div>
+        <span class="core-label mono" id="coreStatus">LISTENING</span>
+      </div>
+
+      <!-- Crystallized output (right) -->
+      <div class="crystal-col crystal-out">
+        <span class="crystal-label mono accent" data-cn-html="Melo 运行时 · 输出">Melo RUNTIME · OUTPUT</span>
+        <div class="crystal-stream" id="crystalOut"></div>
+      </div>
+    </div>
+
+    <div class="action-foot reveal-fade">
+      <span class="mono" data-cn-html="没有转录的迂回。没有文本优先的层。语音即真相之源。">No transcription detour. No text-first layer. Speech is the source of truth.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CAPABILITIES (bento grid) ============ -->
+<section class="section section-ink capabilities" id="capabilities">
+  <div class="container">
+    <div class="section-head reveal-fade">
+      <span class="mono section-kicker light" data-cn-html="— 能力">— CAPABILITIES</span>
+      <h2 class="section-title light" data-cn-html="是运行时，不是功能列表。">A runtime, not a feature list.</h2>
+      <p class="section-sub light" data-cn-html="语音是真相之源，而非文本的翻译。语音原生架构的八个维度。">Speech is the source of truth, not a translation of text. Eight dimensions of a voice-native architecture.</p>
+    </div>
+
+    <div class="bento">
+      <article class="bento-cell bento-wide reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="核心">CORE</span><span class="bento-num mono">01</span></div>
+        <h3 class="bento-h" data-cn-html="语音原生运行时">Voice-Native Runtime</h3>
+        <p data-cn-html="围绕对话节奏构建的运行时——聆听、理解、表达。语音是真相之源，而非文本的翻译。">A runtime built around the rhythm of dialogue — listening, understanding, speaking. Speech is the source of truth, not a translation of text.</p>
+        <div class="bento-viz wave-viz" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </article>
+
+      <article class="bento-cell reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="流">FLOW</span><span class="bento-num mono">02</span></div>
+        <h3 class="bento-h" data-cn-html="全双工">Full-Duplex</h3>
+        <p data-cn-html="同时说与被说。自然的打断、重叠的轮次、连续的流转。">Speak and be spoken to at the same time. Natural interruption, overlapping turns, continuous flow.</p>
+      </article>
+
+      <article class="bento-cell reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="并行">PARALLEL</span><span class="bento-num mono">03</span></div>
+        <h3 class="bento-h" data-cn-html="后台任务">Background Tasks</h3>
+        <p data-cn-html="对话从不为工作暂停。智能体一边说话，一边规划、调用工具、执行。">Conversation never pauses for work. The agent keeps talking while it plans, calls tools, executes.</p>
+      </article>
+
+      <article class="bento-cell bento-tall reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="记忆">MEMORY</span><span class="bento-num mono">04</span></div>
+        <h3 class="bento-h" data-cn-html="长期语音记忆">Long-Term Voice Memory</h3>
+        <p data-cn-html="智能体记得语调、节奏、偏好与历史。它适应你，而非你适应它。">The agent remembers tone, pace, preferences, and history. It adapts to you, not the other way around.</p>
+        <div class="bento-viz dot-viz" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </article>
+
+      <article class="bento-cell reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="创作">CREATE</span><span class="bento-num mono">05</span></div>
+        <h3 class="bento-h" data-cn-html="智能体驱动的创作">Agent-Driven Creation</h3>
+        <p data-cn-html="自主语音智能体负责编排、编辑与迭代。说出一个想法；智能体将其塑造成形。">Autonomous voice agents compose, edit, and iterate. Speak an idea; the agent shapes it into form.</p>
+      </article>
+
+      <article class="bento-cell reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="在场">PRESENCE</span><span class="bento-num mono">06</span></div>
+        <h3 class="bento-h" data-cn-html="多端在场">Multi-Platform</h3>
+        <p data-cn-html="Web、桌面与移动端共享同一个智能体身份与一条连续的语音流。">Web, desktop, and mobile share one agent identity and one continuous voice stream.</p>
+      </article>
+
+      <article class="bento-cell bento-wide reveal-fade">
+        <div class="bento-head"><span class="bento-tag mono" data-cn-html="开放">OPEN</span><span class="bento-num mono">07 · 08</span></div>
+        <h3 class="bento-h" data-cn-html="开放模型层与开放智能体协议">Open Model Layer & Open Agent Protocol</h3>
+        <p data-cn-html="可插拔的语音识别与生成模型层——本地或托管。带入你自己的模型、工具、MCP 服务与技能；Melo 通过语音编排它们。">A pluggable layer for speech recognition and generation models — local or hosted. Bring your own models, tools, MCP servers, and skills; Melo orchestrates them through voice.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PHILOSOPHY (full-bleed dark cinematic) ============ -->
+<section class="section section-paper2 philosophy" id="philosophy">
+  <div class="container">
+    <span class="mono section-kicker reveal-fade" data-cn-html="— 哲学">— PHILOSOPHY</span>
+    <div class="phil-lines reveal-fade">
+      <p class="phil-line" data-cn-html='计算的下一个时代将是<em class="serif-em">说出</em>的，而非打出的。'>The next era of computing will be <em class="serif-em">spoken</em>, not typed.</p>
+      <p class="phil-line" data-cn-html="我们在探索与智能声音共生的意义——">We are exploring what it means to live alongside intelligent voices —</p>
+      <p class="phil-line" data-cn-html="与它们共创，与它们同行思考，">to create with them, to think alongside them,</p>
+      <p class="phil-line" data-cn-html='让<em class="serif-em">在场</em>取代<em class="serif-em">屏幕</em>。'>to let <em class="serif-em">presence</em> replace <em class="serif-em">screens</em>.</p>
+    </div>
+    <div class="phil-foot reveal-fade">
+      <p data-cn-html="对话不为工作暂停。工作回到对话中来。">The conversation does not pause for work. Work returns to the conversation.</p>
+      <p class="phil-punch" data-cn-html='新的交互范式不是靠堆叠功能建立的。<br/><span class="serif-em">而是靠消除距离。</span>'>A new interaction paradigm is not built by adding features.<br/><span class="serif-em">It is built by removing distance.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <img src="assets/Melo-Logo.svg" alt="Melo" class="footer-logo" />
+        <div class="footer-brand-text">
+          <h3 class="footer-statement" data-cn-html='语音是你<em class="serif-em">栖居</em>的界面。'>Voice is the interface <em class="serif-em">you live in</em>.</h3>
+          <p class="footer-tag" data-cn-html="AI 原生语音智能体。说。创。属。">The AI-native voice agent. Speak. Create. Belong.</p>
+        </div>
+      </div>
+      <div class="footer-col footer-col-r">
+        <span class="footer-col-h mono" data-cn-html="探索">EXPLORE</span>
+        <a href="#manifesto" data-cn-html="宣言">Manifesto</a>
+        <a href="#action" data-cn-html="语音实战">Voice in Action</a>
+        <a href="#capabilities" data-cn-html="能力">Capabilities</a>
+        <a href="#philosophy" data-cn-html="哲学">Philosophy</a>
+      </div>
+      <div class="footer-col footer-col-r">
+        <span class="footer-col-h mono" data-cn-html="连接">CONNECT</span>
+        <a href="https://github.com/Yuan-ManX/Melo" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/Yuan-ManX/Melo#license" target="_blank" rel="noopener" data-cn-html="MIT 许可证">MIT License</a>
+      </div>
+      <a class="btn btn-light" href="https://github.com/Yuan-ManX/Melo" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span data-cn-html="星标">Star</span>
+      </a>
+    </div>
+    <div class="footer-bottom">
+      <span class="mono">© 2026 MELO</span>
+      <div class="footer-bottom-right">
+        <button class="lang-toggle" id="langToggle" aria-label="Switch language">
+          <span class="lang-opt" data-lang="en">EN</span>
+          <span class="lang-sep">/</span>
+          <span class="lang-opt" data-lang="cn">中文</span>
+        </button>
+        <span class="footer-back"><a href="#top" data-cn-html="↑ 返回顶部">↑ back to top</a></span>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
