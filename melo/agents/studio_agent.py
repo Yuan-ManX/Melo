@@ -62,16 +62,40 @@ class StudioAgent(BaseAgent):
         project: "ProjectRow | None" = None,
         llm: LLMProvider | None = None,
         history_limit: int = 32,
+        agent_id: str | None = None,
     ) -> None:
         cfg = config or AgentConfig()
         if not cfg.persona:
             cfg.persona = DEFAULT_PERSONA
+        # When no memory is supplied but the agent has an id, reuse the
+        # per-agent shared MemorySystem so long-term facts carry across
+        # sessions and channels (studio chat + live voice). This unifies
+        # memory behaviour with the voice channel, which already shares
+        # one MemorySystem per agent via the registry.
+        if memory is None and agent_id is not None:
+            from melo.agents.memory_registry import get_agent_memory
+
+            memory = get_agent_memory(agent_id)
         # Tools default to a registry that wires the bound edit_audio
         # tool. Subclasses can pass a custom registry to add more.
-        if tools is None:
-            tools = self._build_default_tools(user_id=user_id, db=db)
+        own_tools = tools is None
+        if own_tools:
+            tools = self._build_default_tools(
+                user_id=user_id, db=db, memory=memory, voice_id=cfg.voice_id
+            )
         super().__init__(config=cfg, memory=memory, tools=tools)
+        if own_tools:
+            # Bind the memory tools to this agent's own memory instance so
+            # recall/remember work regardless of how the agent was built
+            # (e.g. via from_db_row, which has no memory to pass yet).
+            from melo.agents.tools.memory_tool import RecallMemoryTool, RememberTool
+
+            self.tools.unregister("recall_memory")
+            self.tools.unregister("remember")
+            self.tools.register(RecallMemoryTool(memory=self.memory))
+            self.tools.register(RememberTool(memory=self.memory))
         self._user_id = user_id
+        self._agent_id = agent_id
         self._db = db
         self._project = project
         # LLM provider injected for tests; resolved lazily from the
@@ -229,38 +253,52 @@ class StudioAgent(BaseAgent):
             system_prompt=getattr(row, "system_prompt", "") or "",
             voice_id=getattr(row, "voice_id", None),
             llm_options=options,
+            history_limit=llm_cfg.get("history_limit") or 32,
         )
         project = getattr(row, "_studio_project", None)
         user_id = getattr(row, "_studio_user_id", None)
         db = getattr(row, "_studio_db", None)
+        agent_id = getattr(row, "id", None)
         return cls(
             config=config,
             user_id=user_id,
             db=db,
             project=project,
+            agent_id=agent_id,
         )
 
     # -- helpers -----------------------------------------------------------
 
     @staticmethod
     def _build_default_tools(
-        *, user_id: str | None, db: "AsyncSession | None"
+        *,
+        user_id: str | None,
+        db: "AsyncSession | None",
+        memory: MemorySystem | None = None,
+        voice_id: str | None = None,
     ) -> ToolRegistry:
         """Build the studio's default tool registry.
 
-        `edit_audio` is bound to the user's DB session if available;
-        otherwise it's registered unbound and will raise on first use
-        (caller must `.bind()` it before invoking).
+        `edit_audio`, `studio_ops`, and the memory tools are bound to the
+        user's DB session / memory if available; otherwise they're
+        registered unbound and will raise on first use (caller must
+        `.bind()` them before invoking). `generate_speech` is bound to
+        the agent's voice so rendered audio uses the configured voice.
         """
         from melo.agents.tools.clone_tool import CloneVoiceTool
         from melo.agents.tools.mcp_tool import CallMCPTool
+        from melo.agents.tools.memory_tool import RecallMemoryTool, RememberTool
+        from melo.agents.tools.studio_tool import StudioOpsTool
         from melo.agents.tools.tts_tool import GenerateSpeechTool
 
         reg = ToolRegistry()
-        reg.register(GenerateSpeechTool())
+        reg.register(GenerateSpeechTool(voice_id=voice_id))
         reg.register(CloneVoiceTool())
         reg.register(EditAudioTool(db=db, user_id=user_id))
         reg.register(CallMCPTool())
+        reg.register(RecallMemoryTool(memory=memory))
+        reg.register(RememberTool(memory=memory))
+        reg.register(StudioOpsTool(db=db, user_id=user_id))
         return reg
 
     async def refresh_project_context(self, db: "AsyncSession", project_id: str) -> None:
