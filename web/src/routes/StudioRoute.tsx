@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { Voice } from '../types'
 import { useStudioStore } from '../stores/studioStore'
+import { useAgentStore } from '../stores/agentStore'
+import { StudioChatPanel } from '../components/studio/StudioChatPanel'
 import { ClipEditor } from '../components/studio/ClipEditor'
 import { Timeline } from '../components/studio/Timeline'
 import { TrackEditor } from '../components/studio/TrackEditor'
@@ -25,12 +27,28 @@ export function StudioRoute() {
 
   const [voices, setVoices] = useState<Voice[]>([])
   const [newProjectName, setNewProjectName] = useState('')
+  const [chatOpen, setChatOpen] = useState(true)
+
+  const { currentAgentId, agents } = useAgentStore()
+  // Prefer the user's selected agent; fall back to the first available one.
+  const agentId = currentAgentId ?? agents[0]?.id ?? null
 
   // Load project list + voice list on mount.
   useEffect(() => {
     fetchProjects()
     api.listVoices().then(setVoices).catch(() => setVoices([]))
   }, [fetchProjects])
+
+  // The agent may mutate the workspace through its tools — re-pull the
+  // current project tree and the project list so the change lands on the
+  // timeline immediately.
+  const refreshAfterTool = useCallback(() => {
+    const { currentProject } = useStudioStore.getState()
+    if (currentProject) {
+      openProject(currentProject.id)
+    }
+    fetchProjects()
+  }, [openProject, fetchProjects])
 
   const selectedClip = useMemo(() => {
     if (!currentProject || !selectedClipId) return null
@@ -63,6 +81,14 @@ export function StudioRoute() {
 
   return (
     <div className="flex h-full">
+      {/* Leftmost pane — AI assistant (collapsible) */}
+      <StudioChatPanel
+        open={chatOpen}
+        onToggle={() => setChatOpen((v) => !v)}
+        agentId={agentId}
+        onToolApplied={refreshAfterTool}
+      />
+
       {/* Left pane — project list */}
       <aside className="flex w-64 flex-col border-r border-[var(--border)] bg-[var(--bg-soft)]/40">
         <div className="border-b border-[var(--border)] px-4 py-3">
