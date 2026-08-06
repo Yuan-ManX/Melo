@@ -125,5 +125,6 @@ class BaseAgent(ABC):
             system_prompt=getattr(row, "system_prompt", "") or "",
             voice_id=getattr(row, "voice_id", None),
             llm_options=options,
+            history_limit=llm_cfg.get("history_limit") or 32,
         )
         return target_cls(config=config)
