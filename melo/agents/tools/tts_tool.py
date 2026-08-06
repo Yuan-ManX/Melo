@@ -27,11 +27,21 @@ class GenerateSpeechTool(Tool):
         "voice_id (str, optional), speed (float, default 1.0)."
     )
 
+    def __init__(self, *, voice_id: str | None = None) -> None:
+        """Configurable default voice.
+
+        `voice_id` is the fallback voice used when the LLM does not pass
+        an explicit `voice_id` on a call. Omitting it keeps the tool's
+        prior behaviour (TTS default voice).
+        """
+        self._voice_id = voice_id
+
     async def run(self, **kwargs: Any) -> dict:
         text = kwargs.get("text")
         if not text:
             raise ToolError("generate_speech requires 'text'")
-        voice_id = kwargs.get("voice_id")
+        # Explicit LLM-supplied voice wins; otherwise the injected default.
+        voice_id = kwargs.get("voice_id") or self._voice_id
         speed = float(kwargs.get("speed", 1.0))
 
         tts = get_voice_manager().get_tts()
