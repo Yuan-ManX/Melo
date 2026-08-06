@@ -17,6 +17,7 @@ import type { ServerEvent } from '../../types/ws'
 import { AgentStatus } from '../chat/AgentStatus'
 import { ChatPanel } from '../chat/ChatPanel'
 import type { TranscriptEntry } from '../chat/MessageBubble'
+import { summarizeToolResult } from '../chat/summarizeToolResult'
 import { AudioRecorder } from './AudioRecorder'
 import { WaveformDisplay } from './WaveformDisplay'
 
@@ -102,11 +103,21 @@ export function VoiceConversation({
           setWsError(event.message)
           break
         case 'tool_call':
-          pushTranscript('system', `🔧 tool_call: ${event.name}`)
+          pushTranscript('system', `🔧 ${event.name}`)
           break
-        case 'tool_result':
-          pushTranscript('system', `✓ tool_result: ${event.name}`)
+        case 'tool_result': {
+          const ok = event.result.ok
+          const success = ok === true
+          const fail = ok === false
+          const detail = summarizeToolResult(event.result)
+          const mark = fail ? '✗' : '✓'
+          const status = success ? ' 成功' : fail ? ' 失败' : ''
+          pushTranscript(
+            'system',
+            `${mark} ${event.name}${status}${detail ? ` • ${detail}` : ''}`,
+          )
           break
+        }
       }
     },
     [pushTranscript],
@@ -137,11 +148,23 @@ export function VoiceConversation({
     setLlmText('')
     llmTextRef.current = ''
     await start()
-  }, [selectedAgentId, start])
+    const agent = agents.find((a) => a.id === selectedAgentId)
+    if (agent) {
+      pushTranscript('system', `开始与 ${agent.name} 对话`)
+    }
+  }, [selectedAgentId, start, agents, pushTranscript])
 
   const stopSession = useCallback(() => {
     stop()
-  }, [stop])
+    if (sessionActive) {
+      pushTranscript('system', '对话已结束')
+    }
+  }, [stop, sessionActive, pushTranscript])
+
+  // Resolve the active identity: prefer the explicitly selected agent,
+  // fall back to the first available one so the persona preview stays useful.
+  const currentAgent =
+    agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null
 
   // WS error events take precedence over session-level errors for display.
   const displayError = wsError ?? error
@@ -182,6 +205,33 @@ export function VoiceConversation({
             {sessionActive ? '结束对话' : '开始对话'}
           </button>
         </div>
+      </div>
+
+      {/* Identity block — who the user is talking to */}
+      <div className="border-b border-[var(--border)] bg-[var(--bg-soft)]/40 px-6 py-3">
+        {currentAgent ? (
+          <>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-[var(--fg)]">
+                {currentAgent.name}
+              </h2>
+              {sessionActive && (
+                <span className="text-xs text-[var(--muted)]">
+                  正在与 {currentAgent.name} 对话
+                </span>
+              )}
+            </div>
+            {currentAgent.persona && (
+              <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">
+                {currentAgent.persona}
+              </p>
+            )}
+          </>
+        ) : (
+          <h2 className="text-lg font-semibold text-[var(--muted)]">
+            未选择 Agent
+          </h2>
+        )}
       </div>
 
       {/* Status row — connection + agent state + errors */}
