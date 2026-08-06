@@ -26,10 +26,16 @@ Wire protocol produced by `RuntimeCallbacks`:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AsyncIterator, Awaitable, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Optional, Protocol
+
+if TYPE_CHECKING:
+    from melo.agents.memory import MemorySystem
+    from melo.agents.tools.registry import ToolRegistry
 
 from melo.llm.base import (
     ChatMessage,
@@ -48,6 +54,11 @@ from melo.voice.manager import get_voice_manager
 from melo.voice.vad import VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
+
+#: Regex matching an inline voice tool-call block. Non-greedy so the
+#: first closing `]]` terminates the block, mirroring the AgentToolLoop
+#: wire protocol so the voice channel and the studio share one format.
+_TOOL_CALL_RE = re.compile(r"\[\[tool_call:\s*(.+?)\]\]", flags=re.DOTALL)
 
 
 class AgentState(str, Enum):
@@ -76,6 +87,10 @@ class RuntimeCallbacks(Protocol):
 
     async def on_error(self, message: str) -> None: ...
 
+    async def on_tool_call(self, name: str, args: dict) -> None: ...
+
+    async def on_tool_result(self, name: str, result: dict) -> None: ...
+
 
 # Type aliases for clarity.
 AudioFeeder = Callable[[], Awaitable[Optional[bytes]]]
@@ -100,6 +115,8 @@ class RuntimeConfig:
     llm_max_tokens: int | None = None
     # System prompt injected as the first chat message when present.
     system_prompt: str | None = None
+    # TTS voice id forwarded to the TTS provider on synthesis.
+    voice_id: str | None = None
 
 
 @dataclass
@@ -136,10 +153,14 @@ class VoiceAgentRuntime:
         callbacks: RuntimeCallbacks | None = None,
         config: RuntimeConfig | None = None,
         history: list[ChatMessage] | None = None,
+        memory: MemorySystem | None = None,
+        tools: Optional["ToolRegistry"] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._callbacks = callbacks
         self._config = config or RuntimeConfig()
+        self._memory = memory
+        self._tools = tools
 
         # Resolve providers lazily through the manager so that an unset
         # ASR/TTS/LLM doesn't crash construction (only first-use matters).
@@ -163,6 +184,9 @@ class VoiceAgentRuntime:
         # the LLM sees prior context. Bounded by `history_limit`.
         self._history: list[ChatMessage] = list(history or [])
         self._history_limit = 32
+        # Cross-token buffer for stripping inline tool-call markers from
+        # the streaming LLM output (see `_filter_tool_markers`).
+        self._tool_filter_buf = ""
 
     # -- public API --------------------------------------------------------
 
@@ -181,6 +205,50 @@ class VoiceAgentRuntime:
     def set_system_prompt(self, prompt: str | None) -> None:
         """Update the system prompt used for subsequent LLM calls."""
         self._config.system_prompt = prompt
+
+    def apply_agent_profile(
+        self,
+        *,
+        persona: str | None = None,
+        system_prompt: str | None = None,
+        voice_id: str | None = None,
+        history_limit: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Bind an agent's persona / voice / LLM bounds to this runtime.
+
+        System prompt resolution is explicit-first: a non-empty
+        `system_prompt` wins; otherwise `persona` is used. When both are
+        absent the prompt stays None so no system message is injected.
+        """
+        if system_prompt:
+            self._config.system_prompt = system_prompt
+        elif persona:
+            self._config.system_prompt = persona
+        if voice_id:
+            self._config.voice_id = voice_id
+        if history_limit is not None:
+            self._history_limit = history_limit
+        if max_tokens is not None:
+            self._config.llm_max_tokens = max_tokens
+
+    def attach_memory(self, memory: MemorySystem) -> None:
+        """Attach a shared memory system for long-term recall."""
+        self._memory = memory
+
+    def attach_tools(self, tools: "ToolRegistry") -> None:
+        """Attach a tool registry the LLM can invoke inline via tool_call."""
+        self._tools = tools
+
+    async def recall_for_turn(self, query: str, *, k: int = 3) -> list:
+        """Retrieve long-term memory facts relevant to the current turn.
+
+        Returns an empty list when no memory system is attached, so the
+        LLM path degrades gracefully to plain conversation history.
+        """
+        if self._memory is None:
+            return []
+        return await self._memory.recall(query, k=k)
 
     def reset_history(self) -> None:
         """Clear conversation history (e.g. on session reset)."""
@@ -317,7 +385,11 @@ class VoiceAgentRuntime:
         back into history.
         """
         llm = self._resolve_llm()
-        messages = self._build_messages(transcript)
+        facts = await self.recall_for_turn(transcript)
+        tool_prompt = self._build_tool_prompt()
+        messages = self._build_messages(
+            transcript, memory_facts=facts, tool_prompt=tool_prompt
+        )
         options = LLMOptions(
             model=self._config.llm_model,
             temperature=self._config.llm_temperature,
@@ -328,25 +400,57 @@ class VoiceAgentRuntime:
         async for token in llm.stream_chat(messages, options=options):
             if not token:
                 continue
+            # Keep the raw token for parsing tool-call blocks, but emit a
+            # marker-free version so the client / TTS never speaks protocol.
             full_text_parts.append(token)
-            await self._callbacks.on_llm_chunk(token)
+            await self._callbacks.on_llm_chunk(self._filter_tool_markers(token))
 
         full_text = "".join(full_text_parts).strip()
+        tool_calls = self._parse_tool_calls(full_text)
+        if tool_calls:
+            llm_text = await self._execute_tools(full_text, tool_calls)
+        else:
+            llm_text = full_text
         # Persist the turn into history so the next turn sees context.
+        # The assistant entry stores the final spoken text (tool markers
+        # stripped) rather than the raw stream.
         self._append_history(ChatMessage(role="user", content=transcript))
-        if full_text:
-            self._append_history(ChatMessage(role="assistant", content=full_text))
-        return full_text
+        if llm_text:
+            self._append_history(ChatMessage(role="assistant", content=llm_text))
+        return llm_text
 
-    def _build_messages(self, user_transcript: str) -> list[ChatMessage]:
+    def _build_messages(
+        self,
+        user_transcript: str,
+        *,
+        memory_facts: list | None = None,
+        tool_prompt: str | None = None,
+    ) -> list[ChatMessage]:
         """Assemble the message list for the LLM call.
 
         Order: [system?] + history (excluding the just-added user
         message — it's appended here) + new user message.
+
+        When `memory_facts` are supplied they are appended to the system
+        content as a long-term-memory block, so the base system_prompt
+        remains intact and recall is folded in as supplementary context.
+        A `tool_prompt` (when present) is appended after the memory block
+        so the LLM knows it may emit inline tool-call blocks.
         """
+        sys = self._config.system_prompt
+        if memory_facts:
+            recall = (
+                "[Long-term memory: "
+                + "; ".join(f"{f.role}: {f.content}" for f in memory_facts)
+                + "]"
+            )
+            sys = f"{sys}\n\n{recall}" if sys else recall
+        if tool_prompt:
+            sys = f"{sys}\n\n{tool_prompt}" if sys else tool_prompt
+
         msgs: list[ChatMessage] = []
-        if self._config.system_prompt:
-            msgs.append(ChatMessage(role="system", content=self._config.system_prompt))
+        if sys:
+            msgs.append(ChatMessage(role="system", content=sys))
         msgs.extend(self._history)
         msgs.append(ChatMessage(role="user", content=user_transcript))
         return msgs
@@ -367,7 +471,7 @@ class VoiceAgentRuntime:
         async def _stream() -> None:
             try:
                 async for chunk in tts.synthesize_stream(
-                    text, options=TTSOptions()
+                    text, options=TTSOptions(voice_id=self._config.voice_id)
                 ):
                     if self._stop_event.is_set():
                         break
@@ -431,3 +535,140 @@ class VoiceAgentRuntime:
             await self._callbacks.on_error(message)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("on_error callback failed: %s", exc)
+
+    # -- inline tool-call support -----------------------------------------
+
+    def _build_tool_prompt(self) -> str | None:
+        """Render the available-tools description for the system message.
+
+        Returns None when no registry is attached or it holds no tools,
+        so the LLM prompt stays clean in plain voice-only sessions.
+        """
+        if self._tools is None:
+            return None
+        available = self._tools.schemas()
+        if not available:
+            return None
+        lines = "\n".join(
+            f"{t['name']}: {t['description']}" for t in available
+        )
+        rules = (
+            "[Voice tools available — call them inline with the "
+            "[[tool_call: name]] protocol. Rules: "
+            "emit [[tool_call: {\"tool\": \"<name>\", \"args\": {...}}]] "
+            "for each call, and keep a short spoken confirmation around it.]"
+        )
+        return f"{rules}\n{lines}"
+
+    def _parse_tool_calls(self, text: str) -> list[tuple[str, dict]]:
+        """Extract (tool_name, args) pairs from inline tool-call blocks.
+
+        Mirrors the AgentToolLoop wire protocol: each block is a JSON
+        object with `tool` and `args` keys. Malformed blocks are skipped
+        so a bad emission can't abort the turn.
+        """
+        calls: list[tuple[str, dict]] = []
+        for raw in _TOOL_CALL_RE.findall(text):
+            try:
+                data = json.loads(raw.strip())
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            name = data.get("tool")
+            if not name:
+                continue
+            args = data.get("args")
+            if not isinstance(args, dict):
+                args = {}
+            calls.append((name, args))
+        return calls
+
+    def _strip_tool_calls(self, text: str) -> str:
+        """Remove all inline tool-call blocks, leaving readable text."""
+        return _TOOL_CALL_RE.sub("", text)
+
+    def _filter_tool_markers(self, token: str) -> str:
+        """Strip inline tool-call markers from a streaming token.
+
+        Tool-call blocks can be split across arbitrary token boundaries,
+        so a per-turn buffer tracks an in-progress block. Normal text
+        outside a block is passed through unchanged; block content is
+        dropped. A block that opens and closes within one token is
+        handled inline, and the tail after a closing marker is itself
+        re-scanned in case it opens another block.
+        """
+        if self._tool_filter_buf:
+            # Mid-block: keep buffering until the closing marker.
+            self._tool_filter_buf += token
+            if "]]" in self._tool_filter_buf:
+                tail = self._tool_filter_buf.split("]]", 1)[1]
+                self._tool_filter_buf = ""
+                return self._filter_tool_markers(tail)
+            return ""
+        if "[[" in token:
+            head, rest = token.split("[[", 1)
+            if "]]" in rest:
+                tail = rest.split("]]", 1)[1]
+                return head + self._filter_tool_markers(tail)
+            # Opening marker not closed in this token — buffer the rest.
+            self._tool_filter_buf = rest
+            return head
+        return token
+
+    async def _emit_tool_call(self, name: str, args: dict) -> None:
+        if self._callbacks is None:
+            return
+        try:
+            await self._callbacks.on_tool_call(name, args)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_tool_call callback failed: %s", exc)
+
+    async def _emit_tool_result(self, name: str, result: dict) -> None:
+        if self._callbacks is None:
+            return
+        try:
+            await self._callbacks.on_tool_result(name, result)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_tool_result callback failed: %s", exc)
+
+    async def _execute_tools(
+        self, full_text: str, tool_calls: list[tuple[str, dict]]
+    ) -> str:
+        """Run every parsed tool call and return the text to speak.
+
+        The spoken text is the marker-free remainder of the stream. When
+        the model emitted only tool calls (no plain text), a short
+        confirmation is synthesised from the tool results so the TTS
+        still has something to say.
+        """
+        display_text = self._strip_tool_calls(full_text).strip()
+        if self._tools is None:
+            # No registry attached — just surface the readable text.
+            return display_text
+
+        confirmations: list[str] = []
+        for name, args in tool_calls:
+            await self._emit_tool_call(name, args)
+            try:
+                result = await self._tools.execute(name, **args)
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            if not isinstance(result, dict) or "ok" not in result:
+                result = {"ok": True, "result": result}
+            await self._emit_tool_result(name, result)
+            confirmations.append(self._summarize_tool_result(name, result))
+
+        if display_text:
+            return display_text
+        return " ".join(confirmations)
+
+    @staticmethod
+    def _summarize_tool_result(name: str, result: dict) -> str:
+        """Build a short spoken confirmation from a tool result."""
+        if isinstance(result, dict):
+            for key in ("message", "text", "name", "status"):
+                val = result.get(key)
+                if isinstance(val, str) and val:
+                    return f"[工具 {name}: {val}]"
+        return f"[工具 {name} 已执行]"
