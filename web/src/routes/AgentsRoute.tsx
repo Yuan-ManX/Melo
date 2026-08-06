@@ -9,6 +9,8 @@ interface AgentDraft {
   voice_id: string
   llm_model: string
   llm_temperature: string
+  llm_history_limit: string
+  llm_max_tokens: string
 }
 
 const EMPTY_DRAFT: AgentDraft = {
@@ -18,6 +20,8 @@ const EMPTY_DRAFT: AgentDraft = {
   voice_id: '',
   llm_model: '',
   llm_temperature: '0.7',
+  llm_history_limit: '',
+  llm_max_tokens: '',
 }
 
 function toDraft(agent: Agent): AgentDraft {
@@ -29,6 +33,8 @@ function toDraft(agent: Agent): AgentDraft {
     voice_id: agent.voice_id ?? '',
     llm_model: (cfg.model as string) ?? '',
     llm_temperature: String(cfg.temperature ?? 0.7),
+    llm_history_limit: cfg.history_limit != null ? String(cfg.history_limit) : '',
+    llm_max_tokens: cfg.max_tokens != null ? String(cfg.max_tokens) : '',
   }
 }
 
@@ -37,6 +43,10 @@ function draftToPayload(draft: AgentDraft) {
   if (draft.llm_model) llm_config.model = draft.llm_model
   const temp = parseFloat(draft.llm_temperature)
   if (!Number.isNaN(temp)) llm_config.temperature = temp
+  const historyLimit = parseInt(draft.llm_history_limit, 10)
+  if (!Number.isNaN(historyLimit) && historyLimit > 0) llm_config.history_limit = historyLimit
+  const maxTokens = parseInt(draft.llm_max_tokens, 10)
+  if (!Number.isNaN(maxTokens) && maxTokens > 0) llm_config.max_tokens = maxTokens
   return {
     name: draft.name,
     persona: draft.persona || null,
@@ -218,6 +228,28 @@ export function AgentsRoute() {
                 className="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-sm text-[var(--fg)] focus:border-[var(--accent)] focus:outline-none"
               />
             </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--muted)]">记忆深度（轮）</span>
+              <input
+                type="number"
+                min={1}
+                value={draft.llm_history_limit}
+                onChange={(e) => setDraft({ ...draft, llm_history_limit: e.target.value })}
+                className="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-sm text-[var(--fg)] focus:border-[var(--accent)] focus:outline-none"
+                placeholder="如：16（空=默认32）"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--muted)]">Max tokens</span>
+              <input
+                type="number"
+                min={1}
+                value={draft.llm_max_tokens}
+                onChange={(e) => setDraft({ ...draft, llm_max_tokens: e.target.value })}
+                className="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-sm text-[var(--fg)] focus:border-[var(--accent)] focus:outline-none"
+                placeholder="如：512（空=默认）"
+              />
+            </label>
           </div>
           <div className="mt-3 flex gap-2">
             <button
@@ -299,6 +331,16 @@ export function AgentsRoute() {
                   {typeof cfg.temperature === 'number' ? (
                     <span className="rounded bg-[var(--border)]/40 px-2 py-0.5 text-[var(--muted)]">
                       T={cfg.temperature}
+                    </span>
+                  ) : null}
+                  {typeof cfg.history_limit === 'number' ? (
+                    <span className="rounded bg-[var(--border)]/40 px-2 py-0.5 text-[var(--muted)]">
+                      记忆{cfg.history_limit}轮
+                    </span>
+                  ) : null}
+                  {typeof cfg.max_tokens === 'number' ? (
+                    <span className="rounded bg-[var(--border)]/40 px-2 py-0.5 text-[var(--muted)]">
+                      {cfg.max_tokens}tok
                     </span>
                   ) : null}
                 </div>
