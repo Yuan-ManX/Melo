@@ -3,8 +3,9 @@
 Pipeline:
 
     VAD  ──▶  ASR  ──▶  LLM  ──▶  TTS  ──▶  audio out
-                                ▲
-                                │ barge-in interrupts TTS
+           │                                ▲
+           │ barge-in cancels ASR / LLM / TTS
+           └────────────────────────────────┘
 
 The runtime resolves ASR / TTS / LLM providers lazily through their
 respective plugin managers (`melo.voice.manager`, `melo.llm.manager`),
@@ -12,6 +13,13 @@ so the configured provider is loaded on first use rather than at
 construction time. Set `RuntimeConfig.stub_llm=True` to force the
 StubLLM provider for CI / dev without API keys; otherwise the real
 LLM provider from `melo.config.settings.llm_provider` is used.
+
+Barge-in is the single most-important interaction primitive for a
+human-like voice agent. The runtime tracks an in-flight `_turn_task`
+(in addition to the legacy `_tts_task`) so any point of the pipeline
+(ASR / LLM / TTS) can be cancelled as soon as the user starts talking.
+Barge-in is guarded by a `min_speech_for_barge_ms` threshold so short
+glitches (cough, mic pop, background laugh) don't abort turns.
 
 Wire protocol produced by `RuntimeCallbacks`:
 
@@ -21,6 +29,7 @@ Wire protocol produced by `RuntimeCallbacks`:
     llm_chunk(text)
     tts_chunk(bytes)
     error(message)
+    interruption(reason)   ← fired when a turn is cancelled mid-flight
 """
 
 from __future__ import annotations
@@ -91,10 +100,20 @@ class RuntimeCallbacks(Protocol):
 
     async def on_tool_result(self, name: str, result: dict) -> None: ...
 
+    async def on_interruption(self, reason: str) -> None: ...
+
+    async def on_voice_changed(self, voice_id: str) -> None: ...
+
 
 # Type aliases for clarity.
 AudioFeeder = Callable[[], Awaitable[Optional[bytes]]]
 """Async callable that returns the next audio chunk, or None on EOF."""
+
+
+# Reasons emitted with on_interruption so clients can differentiate the
+# interruption source without string-matching state values.
+INTERRUPT_REASON_BARGE_IN = "barge_in"          # user started speaking
+INTERRUPT_REASON_CLIENT_STOP = "client_stop"    # caller invoked stop()
 
 
 @dataclass
@@ -117,6 +136,20 @@ class RuntimeConfig:
     system_prompt: str | None = None
     # TTS voice id forwarded to the TTS provider on synthesis.
     voice_id: str | None = None
+    # -- barge-in tuning --------------------------------------------------
+    # Master switch for interrupting turns when new speech arrives during
+    # THINKING or SPEAKING. Turning this off gives a strict turn-based
+    # behaviour useful for CI tests that don't feed overlapping audio.
+    barge_in_enabled: bool = True
+    # Require this many ms of VAD-speech before treating a new utterance
+    # as a real interruption. Short blips (mic pop, cough, bg laugh)
+    # often trigger VAD momentarily and shouldn't abort the turn.
+    min_speech_for_barge_ms: int = 120
+    # Audio frame duration the runtime assumes when converting
+    # min_speech_for_barge_ms into a speech-frame counter. The actual
+    # frame size varies by the client, but 30 ms matches the 480-sample
+    # @ 16 kHz PCM windows the test helpers use.
+    barge_frame_ms: int = 30
 
 
 @dataclass
@@ -137,9 +170,21 @@ class VoiceAgentRuntime:
       * Internally, audio is queued into a VAD detector; speech segments
         are accumulated and forwarded to ASR.
       * On speech end, ASR is finalised → LLM is invoked → TTS streams.
-      * `barge_in()` interrupts the current TTS playback and resets to
-        LISTENING.
+      * `barge_in()` interrupts the current turn (ASR / LLM / TTS) and
+        resets to LISTENING so the new user utterance can be captured.
       * `stop()` drains all in-flight tasks and resets state to IDLE.
+
+    Task tracking:
+      * `_main_task` drives the VAD loop for all audio (never cancelled
+        except on `stop()`).
+      * `_turn_task` is one background task per utterance and covers the
+        entire ASR → LLM → TTS pipeline. Barge-in cancels `_turn_task`,
+        which cascades into cancelling an in-flight LLM stream or TTS
+        stream via `asyncio.Task.cancel()`. This guarantees stale turn
+        output never reaches the client after interruption.
+      * `_tts_task` (legacy) is additionally tracked inside `_run_tts`
+        so `_cancel_tts()` can be invoked standalone by callers who only
+        want to abort playback without aborting the rest of the turn.
     """
 
     def __init__(
@@ -177,9 +222,19 @@ class VoiceAgentRuntime:
         self._audio_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
         self._current_turn: _ConversationTurn | None = None
         self._tts_task: asyncio.Task | None = None
+        self._turn_task: asyncio.Task | None = None
         self._main_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._speech_active = False
+        # Count of consecutive speech frames delivered while the current
+        # utterance was classified as a potential barge-in. Used to
+        # implement `min_speech_for_barge_ms` so a single cough frame
+        # doesn't abort the current turn.
+        self._barge_speech_frames = 0
+        # When True, `_process_turn` knows its async context is being
+        # cancelled and must not append to history or emit final events.
+        # The flag is set by `_cancel_turn` before cancelling the task.
+        self._turn_cancelled = False
         # Conversation history — accumulates user + assistant turns so
         # the LLM sees prior context. Bounded by `history_limit`.
         self._history: list[ChatMessage] = list(history or [])
@@ -232,6 +287,32 @@ class VoiceAgentRuntime:
         if max_tokens is not None:
             self._config.llm_max_tokens = max_tokens
 
+    async def set_voice(self, voice_id: str) -> None:
+        """Switch the TTS voice used by future turns at runtime.
+
+        Lets the user (or the agent itself, via a tool) swap voices
+        without restarting the session. The next TTS synthesis will
+        use the new voice_id; in-flight TTS playback is NOT cancelled
+        — call `barge_in()` separately if you want to abort the
+        current playback too. Emits `on_voice_changed(voice_id)` so
+        clients can update their UI badge / dropdown selection.
+
+        Empty / whitespace-only voice_ids are ignored (no-op) so a
+        buggy client can't clear the configured voice by accident.
+        """
+        if not voice_id or not voice_id.strip():
+            return
+        # Normalize + dedupe: skip the work + event if the voice is
+        # already active. This makes the call idempotent, which the
+        # voice picker UI relies on (it sends `set_voice` on every
+        # dropdown change, including back to the currently-selected
+        # voice when the user cancels the picker).
+        normalized = voice_id.strip()
+        if self._config.voice_id == normalized:
+            return
+        self._config.voice_id = normalized
+        await self._emit_voice_changed(normalized)
+
     def attach_memory(self, memory: MemorySystem) -> None:
         """Attach a shared memory system for long-term recall."""
         self._memory = memory
@@ -262,8 +343,15 @@ class VoiceAgentRuntime:
         self._main_task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
-        """Stop the runtime, drain in-flight TTS, and reset state."""
+        """Stop the runtime, drain in-flight tasks, and reset state.
+
+        Emits an `on_interruption("client_stop")` event so callers can
+        distinguish a graceful shutdown from a mid-turn interruption.
+        """
         self._stop_event.set()
+        # Cancel the in-flight turn (if any) first so no more TTS/LLM
+        # callbacks fire into a closing socket.
+        await self._cancel_turn(reason=INTERRUPT_REASON_CLIENT_STOP, emit_event=True)
         # Signal end-of-stream to the audio queue consumer.
         await self._audio_queue.put(None)
         if self._main_task is not None:
@@ -280,15 +368,34 @@ class VoiceAgentRuntime:
         await self._audio_queue.put(chunk)
 
     async def barge_in(self) -> None:
-        """User interrupted Agent — abort TTS, drop pending turn, go LISTENING."""
-        await self._cancel_tts()
+        """User interrupted the agent — abort turn + drop pending output, go LISTENING.
+
+        Cancels the whole ASR → LLM → TTS pipeline (not just TTS) so
+        stale assistant output never reaches the client. Then fires
+        `on_interruption("barge_in")` so the client knows to stop
+        buffering any audio that was already pushed before the cancel
+        was observed.
+        """
+        if self._stop_event.is_set():
+            return
+        await self._cancel_turn(reason=INTERRUPT_REASON_BARGE_IN, emit_event=True)
         self._current_turn = None
+        self._barge_speech_frames = 0
         await self._set_state(AgentState.LISTENING)
 
     # -- main loop ---------------------------------------------------------
 
     async def _run_loop(self) -> None:
-        """Consume audio from the queue, feed VAD, drive turn lifecycle."""
+        """Consume audio from the queue, feed VAD, drive turn lifecycle.
+
+        Each VAD `start` event marks a potential new utterance. If the
+        runtime is already THINKING or SPEAKING when the event arrives,
+        this is a barge-in. To avoid cancelling turns on short glitches,
+        we count consecutive speech frames via `_audio_iter`; once the
+        threshold is crossed, `barge_in()` is invoked. If the user
+        stops before crossing the threshold, we leave the in-flight
+        turn alone and drop the short utterance.
+        """
         await self._set_state(AgentState.LISTENING)
         try:
             async for event in self._vad.feed(self._audio_iter()):
@@ -299,20 +406,74 @@ class VoiceAgentRuntime:
                     self._current_turn = _ConversationTurn(
                         started_at_frame=event.ts and 0 or 0,
                     )
-                    # Make sure we're in LISTENING while user is talking.
-                    if self._state == AgentState.SPEAKING:
-                        # Implicit barge-in: user started speaking during TTS.
-                        await self._cancel_tts()
-                    await self._set_state(AgentState.LISTENING)
+                    # If we're mid-turn (THINKING or SPEAKING), treat
+                    # this as a candidate barge-in. The actual barge
+                    # fires once `_barge_speech_frames` crosses the
+                    # threshold below, so a single glitched frame
+                    # doesn't abort output.
+                    if (
+                        self._config.barge_in_enabled
+                        and self._state in {AgentState.THINKING, AgentState.SPEAKING}
+                    ):
+                        self._barge_speech_frames = 0
+                    else:
+                        # Not an interruption — go straight to LISTENING.
+                        await self._set_state(AgentState.LISTENING)
+                elif event.kind == "speech":
+                    # VAD emits `speech` events for every audio frame
+                    # classified as speech; count them for the threshold.
+                    if (
+                        self._config.barge_in_enabled
+                        and self._speech_active
+                        and self._state in {AgentState.THINKING, AgentState.SPEAKING}
+                    ):
+                        self._barge_speech_frames += 1
+                        frames_required = max(
+                            1,
+                            int(
+                                self._config.min_speech_for_barge_ms
+                                / max(1, self._config.barge_frame_ms)
+                            ),
+                        )
+                        if self._barge_speech_frames == frames_required:
+                            # Passed threshold — perform the actual
+                            # interruption now. Further speech frames
+                            # this utterance are user talking.
+                            await self.barge_in()
                 elif event.kind == "end":
                     self._speech_active = False
                     # Hand off accumulated audio to the turn processor.
                     turn = self._current_turn
                     self._current_turn = None
+                    # Drop short utterances that were counting toward a
+                    # barge-in threshold — they're noise, not speech.
+                    if self._config.barge_in_enabled and turn is not None:
+                        frames_required = max(
+                            1,
+                            int(
+                                self._config.min_speech_for_barge_ms
+                                / max(1, self._config.barge_frame_ms)
+                            ),
+                        )
+                        if (
+                            self._barge_speech_frames > 0
+                            and self._barge_speech_frames < frames_required
+                        ):
+                            self._barge_speech_frames = 0
+                            continue
+                    self._barge_speech_frames = 0
                     if turn is not None and len(turn.audio) > 0:
+                        # Cancel any existing turn task so only the
+                        # newest utterance drives output. Without this,
+                        # two near-simultaneous VAD end events would
+                        # spawn two turn tasks that race.
+                        if self._turn_task is not None and not self._turn_task.done():
+                            await self._cancel_turn(
+                                reason=INTERRUPT_REASON_BARGE_IN, emit_event=False
+                            )
                         # Spawn turn processing in the background so the
                         # VAD loop keeps listening for the next utterance.
-                        asyncio.create_task(self._process_turn(turn))
+                        self._turn_task = asyncio.create_task(self._process_turn(turn))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -333,9 +494,25 @@ class VoiceAgentRuntime:
     # -- turn processing ---------------------------------------------------
 
     async def _process_turn(self, turn: _ConversationTurn) -> None:
-        """ASR → LLM → TTS for one user utterance."""
+        """ASR → LLM → TTS for one user utterance.
+
+        Cancellation semantics:
+          * `_cancel_turn` sets `_turn_cancelled = True` and cancels the
+            wrapping `_turn_task` asyncio task. That propagates
+            CancelledError into whichever await in this chain is active.
+          * CancelledError is re-raised so the task finishes in the
+            cancelled state (important for the main loop's "task done"
+            checks).
+          * History is NOT appended for cancelled turns so a half-spoken
+            "What's the wea" doesn't poison subsequent turns.
+          * `_turn_cancelled` is reset at the top so a cancelled turn
+            never interferes with the next turn's state.
+        """
+        self._turn_cancelled = False
         try:
             transcript = await self._run_asr(turn)
+            if self._turn_cancelled:
+                return
             if transcript:
                 await self._callbacks.on_asr_final(transcript)
             else:
@@ -345,21 +522,28 @@ class VoiceAgentRuntime:
 
             await self._set_state(AgentState.THINKING)
             llm_text = await self._run_llm(transcript)
+            if self._turn_cancelled:
+                return
 
             await self._set_state(AgentState.SPEAKING)
             await self._run_tts(llm_text)
         except (VoiceProviderUnavailable, LLMProviderUnavailable) as exc:
+            if self._turn_cancelled:
+                return
             logger.warning("Provider unavailable: %s", exc)
             await self._emit_error(f"provider unavailable: {exc}")
             await self._set_state(AgentState.LISTENING)
         except asyncio.CancelledError:
+            self._turn_cancelled = True
             raise
         except Exception as exc:
+            if self._turn_cancelled:
+                return
             logger.exception("Turn processing failed")
             await self._emit_error(f"turn failed: {exc}")
             await self._set_state(AgentState.LISTENING)
         finally:
-            if self._state == AgentState.SPEAKING:
+            if not self._turn_cancelled and self._state == AgentState.SPEAKING:
                 await self._set_state(AgentState.LISTENING)
 
     async def _run_asr(self, turn: _ConversationTurn) -> str:
@@ -381,8 +565,8 @@ class VoiceAgentRuntime:
 
         Builds the chat messages from the conversation history + the new
         user transcript, streams tokens from the LLM provider, emits
-        each token as `on_llm_chunk`, and accumulates the full text
-        back into history.
+        each token as `on_llm_chunk`, and (on a non-cancelled turn)
+        accumulates the full text back into history.
         """
         llm = self._resolve_llm()
         facts = await self.recall_for_turn(transcript)
@@ -397,14 +581,24 @@ class VoiceAgentRuntime:
         )
 
         full_text_parts: list[str] = []
-        async for token in llm.stream_chat(messages, options=options):
-            if not token:
-                continue
-            # Keep the raw token for parsing tool-call blocks, but emit a
-            # marker-free version so the client / TTS never speaks protocol.
-            full_text_parts.append(token)
-            await self._callbacks.on_llm_chunk(self._filter_tool_markers(token))
+        try:
+            async for token in llm.stream_chat(messages, options=options):
+                if self._turn_cancelled:
+                    # Stop emitting chunks mid-stream so the client
+                    # never sees a half-finished response.
+                    break
+                if not token:
+                    continue
+                # Keep the raw token for parsing tool-call blocks, but emit a
+                # marker-free version so the client / TTS never speaks protocol.
+                full_text_parts.append(token)
+                await self._callbacks.on_llm_chunk(self._filter_tool_markers(token))
+        except asyncio.CancelledError:
+            self._turn_cancelled = True
+            raise
 
+        if self._turn_cancelled:
+            return ""
         full_text = "".join(full_text_parts).strip()
         tool_calls = self._parse_tool_calls(full_text)
         if tool_calls:
@@ -413,10 +607,12 @@ class VoiceAgentRuntime:
             llm_text = full_text
         # Persist the turn into history so the next turn sees context.
         # The assistant entry stores the final spoken text (tool markers
-        # stripped) rather than the raw stream.
-        self._append_history(ChatMessage(role="user", content=transcript))
-        if llm_text:
-            self._append_history(ChatMessage(role="assistant", content=llm_text))
+        # stripped) rather than the raw stream. If the turn was cancelled
+        # after the stream finished (race), never persist.
+        if not self._turn_cancelled:
+            self._append_history(ChatMessage(role="user", content=transcript))
+            if llm_text:
+                self._append_history(ChatMessage(role="assistant", content=llm_text))
         return llm_text
 
     def _build_messages(
@@ -473,7 +669,7 @@ class VoiceAgentRuntime:
                 async for chunk in tts.synthesize_stream(
                     text, options=TTSOptions(voice_id=self._config.voice_id)
                 ):
-                    if self._stop_event.is_set():
+                    if self._stop_event.is_set() or self._turn_cancelled:
                         break
                     await self._callbacks.on_tts_chunk(chunk)
             except asyncio.CancelledError:
@@ -482,6 +678,9 @@ class VoiceAgentRuntime:
         self._tts_task = asyncio.create_task(_stream())
         try:
             await self._tts_task
+        except asyncio.CancelledError:
+            # Propagate so the wrapping turn task sees cancellation.
+            raise
         finally:
             self._tts_task = None
 
@@ -509,6 +708,30 @@ class VoiceAgentRuntime:
 
     # -- helpers -----------------------------------------------------------
 
+    async def _cancel_turn(self, *, reason: str, emit_event: bool) -> None:
+        """Cancel the in-flight turn task + TTS + set cancelled flag.
+
+        * `reason` — one of the `INTERRUPT_REASON_*` constants. Used as
+          the payload of `on_interruption` when `emit_event=True`.
+        * `emit_event` — if True, calls `on_interruption(reason)` so the
+          client can reset its UI. Set to False when the interruption is
+          a side-effect of another event (e.g. the VAD end-of-utterance
+          cancelling a previous turn) to avoid spamming interruption
+          events during normal speech flow.
+        """
+        if not self._turn_cancelled:
+            self._turn_cancelled = True
+        if self._turn_task is not None and not self._turn_task.done():
+            self._turn_task.cancel()
+            try:
+                await self._turn_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._turn_task = None
+        await self._cancel_tts()
+        if emit_event:
+            await self._emit_interruption(reason)
+
     async def _cancel_tts(self) -> None:
         if self._tts_task is not None and not self._tts_task.done():
             self._tts_task.cancel()
@@ -535,6 +758,40 @@ class VoiceAgentRuntime:
             await self._callbacks.on_error(message)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("on_error callback failed: %s", exc)
+
+    async def _emit_interruption(self, reason: str) -> None:
+        """Fire the interruption callback if implemented.
+
+        Older callers might not implement `on_interruption` so we
+        check hasattr rather than requiring it on the Protocol (the
+        Protocol method includes a `...` default body which allows
+        omission at runtime).
+        """
+        if self._callbacks is None:
+            return
+        cb = getattr(self._callbacks, "on_interruption", None)
+        if cb is None:
+            return
+        try:
+            await cb(reason)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_interruption callback failed: %s", exc)
+
+    async def _emit_voice_changed(self, voice_id: str) -> None:
+        """Fire the voice-changed callback so clients can sync their UI.
+
+        Uses getattr for the same reason `_emit_interruption` does —
+        older callback implementations may not implement the method.
+        """
+        if self._callbacks is None:
+            return
+        cb = getattr(self._callbacks, "on_voice_changed", None)
+        if cb is None:
+            return
+        try:
+            await cb(voice_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_voice_changed callback failed: %s", exc)
 
     # -- inline tool-call support -----------------------------------------
 
