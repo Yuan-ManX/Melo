@@ -279,15 +279,20 @@ class StudioAgent(BaseAgent):
     ) -> ToolRegistry:
         """Build the studio's default tool registry.
 
-        `edit_audio`, `studio_ops`, and the memory tools are bound to the
-        user's DB session / memory if available; otherwise they're
-        registered unbound and will raise on first use (caller must
-        `.bind()` them before invoking). `generate_speech` is bound to
-        the agent's voice so rendered audio uses the configured voice.
+        `edit_audio`, `studio_ops`, `transcribe_audio`, `export_mixdown`,
+        and the memory tools are bound to the user's DB session / memory
+        if available; otherwise they're registered unbound and will
+        raise on first use (caller must `.bind()` them before invoking).
+        `generate_speech` is bound to the agent's voice so rendered
+        audio uses the configured voice. `preview_voice` is stateless
+        and needs no binding.
         """
+        from melo.agents.tools.asr_tool import TranscribeAudioTool
         from melo.agents.tools.clone_tool import CloneVoiceTool
         from melo.agents.tools.mcp_tool import CallMCPTool
         from melo.agents.tools.memory_tool import RecallMemoryTool, RememberTool
+        from melo.agents.tools.mixdown_tool import ExportMixdownTool
+        from melo.agents.tools.preview_voice_tool import PreviewVoiceTool
         from melo.agents.tools.studio_tool import StudioOpsTool
         from melo.agents.tools.tts_tool import GenerateSpeechTool
 
@@ -299,6 +304,9 @@ class StudioAgent(BaseAgent):
         reg.register(RecallMemoryTool(memory=memory))
         reg.register(RememberTool(memory=memory))
         reg.register(StudioOpsTool(db=db, user_id=user_id))
+        reg.register(TranscribeAudioTool(db=db, user_id=user_id))
+        reg.register(PreviewVoiceTool())
+        reg.register(ExportMixdownTool(db=db, user_id=user_id))
         return reg
 
     async def refresh_project_context(self, db: "AsyncSession", project_id: str) -> None:
