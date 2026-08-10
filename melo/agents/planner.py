@@ -3,10 +3,9 @@
 Given a user request, the planner produces a `Plan`: an ordered list
 of `PlanStep`s, each describing a tool invocation or a sub-goal.
 
-Melo ships a rule-based planner using keyword-driven decomposition,
-enabling multi-step execution without an LLM. An LLM-backed planner
-implements the same `Planner.plan()` interface for richer
-decomposition.
+Melo ships a rule-based planner (keyword-driven decomposition for
+multi-step execution without an LLM) and an LLM-backed planner that
+implements the same `Planner.plan()` interface.
 """
 
 from __future__ import annotations
@@ -80,6 +79,43 @@ class RuleBasedPlanner:
 
     async def plan(self, request: str, *, context: list[ChatMessage] | None = None) -> Plan:
         text = request.lower()
+        # Studio-read intents — the voice channel uses these to let the
+        # user drive the editor by speaking. Single-step plans cover
+        # self-contained actions; dependent flows (create → track → clip)
+        # are orchestrated by the LLM via inline [[tool_call]] blocks.
+        if any(k in text for k in ("create project", "make a project", "new project")):
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "create_project", "name": request},
+                        description="Create a new studio project",
+                    )
+                ],
+            )
+        if "list" in text and "project" in text and "voice" not in text:
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "list_projects"},
+                        description="List the user's studio projects",
+                    )
+                ],
+            )
+        if any(k in text for k in ("change your voice", "switch your voice")):
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="voice_control",
+                        args={"action": "set", "voice_id": ""},
+                        description="Switch the agent's speaking voice",
+                    )
+                ],
+            )
         if "clone" in text and "voice" in text:
             return Plan(
                 goal=request,
