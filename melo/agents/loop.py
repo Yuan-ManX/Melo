@@ -1,28 +1,18 @@
 """AgentToolLoop — the omnipotent agentic tool loop for Melo agents.
 
-A single conversational turn can now drive the whole studio: the LLM
-streams text tokens while simultaneously emitting structured tool-call
-blocks, the loop executes each call, feeds the result back as a system
-message, and lets the LLM continue until it produces a final summary.
-This turns a chat into a full orchestration — create a project, add a
-track, generate speech, clone a voice, edit a clip — all in one turn.
+One conversational turn drives the whole studio: the LLM streams text
+while emitting structured tool-call blocks, the loop executes each call,
+feeds the result back, and lets the LLM continue until it summarises —
+a chat becomes full orchestration (create project, add track, generate
+speech, clone voice, edit clip) in one turn.
 
-Tool-call wire protocol
------------------------
-When the model wants a tool executed it emits a JSON block wrapped in a
-distinctive fenced marker::
+Tool-call wire protocol — the model emits a fenced JSON block::
 
     [[tool_call: {"tool": "generate_speech", "args": {"text": "hi"}}]]
 
-Multiple blocks may appear in a single response. After every block is
-executed the results are appended to the conversation as system
-messages and the loop asks the LLM to continue, so it can reason about
-the outcome and either call more tools or summarise.
-
-The loop is transport-agnostic: it pushes events through an optional
-async `emit` callback (`{"type": "llm_chunk", "text": ...}` and
-`{"type": "tool_call", "name", "args", "result"}`) and returns a plain
-dict the caller can forward however it likes.
+Multiple blocks may appear per response. The loop is transport-agnostic:
+it pushes events through an optional async `emit` callback and returns a
+plain dict the caller forwards.
 """
 
 from __future__ import annotations
@@ -104,7 +94,11 @@ class AgentToolLoop:
                 args = call.get("args") or {}
                 result: Any
                 try:
-                    result = await self.agent.tools.execute(tool, **args)
+                    result = await self.agent.tools.execute(
+                        tool,
+                        on_retry=self._emit_retry,
+                        **args,
+                    )
                 except Exception as exc:  # ToolError or any failure
                     result = {"ok": False, "error": str(exc)}
                 record = {"tool": tool, "args": args, "result": result}
@@ -143,6 +137,27 @@ class AgentToolLoop:
             "tool_calls": tool_calls,
             "iterations": iterations,
         }
+
+    # -- retry bridge ------------------------------------------------------
+
+    async def _emit_retry(
+        self, name: str, attempt: int, max_retries: int, error: str
+    ) -> None:
+        """Stage 23: surface a tool re-attempt through the emit callback.
+
+        Lets the studio channel show a transient retry badge while the
+        registry re-attempts a failing tool with exponential backoff.
+        """
+        if self._emit is not None:
+            await self._emit(
+                {
+                    "type": "tool_retry",
+                    "name": name,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": error,
+                }
+            )
 
     # -- parsing helpers ---------------------------------------------------
 
