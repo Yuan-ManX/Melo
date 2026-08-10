@@ -1,15 +1,9 @@
 """edit_audio tool — conversational audio editing via studio_service.
 
-The studio agent dispatches natural-language edit instructions through
-this tool. The tool resolves the clip (verifying ownership) and calls
-`studio_service.apply_edit`, which interprets the instruction, mutates
-the clip + metadata, and may trigger a TTS regeneration when text or
-speed changes.
-
-The DB session + user_id are bound at construction time so the tool
-can be registered once per request lifecycle. When constructed without
-a session (e.g. by `default_registry()` for the voice runtime), it
-raises a clear `ToolError` instructing the caller to bind a session.
+Resolves a clip (verifying ownership) and calls `studio_service.apply_edit`,
+which interprets the instruction, mutates the clip + metadata, and may
+trigger TTS regeneration. The DB session + user_id are bound at
+construction; without a session it raises `ToolError`.
 """
 
 from __future__ import annotations
