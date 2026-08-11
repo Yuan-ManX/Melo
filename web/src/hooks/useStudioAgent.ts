@@ -27,13 +27,22 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  * `type` are populated; the rest stay undefined.
  */
 export interface StudioAgentEvent {
-  type: 'connected' | 'llm_chunk' | 'tool_call' | 'done' | 'error'
+  type:
+    | 'connected'
+    | 'llm_chunk'
+    | 'tool_call'
+    | 'tool_retry'
+    | 'done'
+    | 'error'
   text?: string
   name?: string
   agent_id?: string
   agent_name?: string
   args?: unknown
   result?: unknown
+  /** Stage 23: retry progress for a tool that failed transiently. */
+  attempt?: number
+  max_retries?: number
   message?: string
 }
 
@@ -101,6 +110,14 @@ export function useStudioAgent(opts: UseStudioAgentOptions): UseStudioAgentApi {
         name: msg['name'] as string | undefined,
         args: msg['args'],
         result: msg['result'],
+      })
+    } else if (type === 'tool_retry') {
+      onEventRef.current?.({
+        type: 'tool_retry',
+        name: msg['name'] as string | undefined,
+        attempt: msg['attempt'] as number | undefined,
+        max_retries: msg['max_retries'] as number | undefined,
+        message: msg['error'] as string | undefined,
       })
     } else if (type === 'done') {
       onEventRef.current?.({ type: 'done' })
