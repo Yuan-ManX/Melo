@@ -9,6 +9,7 @@ from melo.api.routes import (
     settings,
     studio,
     studio_ws,
+    tools,
     voices,
     ws,
 )
@@ -20,5 +21,6 @@ api_router.include_router(conversations.router)
 api_router.include_router(voices.router)
 api_router.include_router(studio.router)
 api_router.include_router(settings.router)
+api_router.include_router(tools.router)
 api_router.include_router(ws.router)
 api_router.include_router(studio_ws.router)
