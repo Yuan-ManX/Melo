@@ -1,13 +1,12 @@
 """Abstract interfaces for voice model providers.
 
-Each provider is *pluggable*: concrete implementations live under
-`melo/voice/asr`, `melo/voice/tts`, `melo/voice/clone`, and a
-`VoicePluginManager` (see `manager.py`) routes requests to the active
-implementation based on settings.
+Providers are pluggable: implementations live under `melo/voice/asr`,
+`melo/voice/tts`, and `melo/voice/clone`; a `VoicePluginManager`
+(`manager.py`) routes requests to the active one via settings.
 
-All providers must support streaming where applicable. Implementations
-that cannot stream should still expose the streaming async-iterator
-contract — they may yield a single chunk.
+All providers support streaming where applicable; non-streaming
+implementations still expose the async-iterator contract, yielding a
+single chunk.
 """
 
 from __future__ import annotations
