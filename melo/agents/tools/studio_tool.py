@@ -1,14 +1,10 @@
 """studio_ops tool — drive the whole studio from inside the agent loop.
 
-A single tool that dispatches on an `action` argument, so the LLM can
-create a project, add a track, add a clip, render audio, apply edits,
-and inspect the sound library — all through one registered surface.
-Each action maps onto `melo.services.studio_service` where a function
-exists; actions without a service helper query the ORM models directly.
-
-The tool is bound to a DB session + user at construction time. Without
-them it raises a clear `ToolError` instructing the caller to bind them,
-mirroring the `edit_audio` tool's constraint.
+One tool dispatching on an `action` argument — create a project, add a
+track / clip, render audio, apply edits, inspect the sound library —
+mapping each action onto `melo.services.studio_service` (or the ORM
+models directly). Bound to a DB session + user; without them it raises
+`ToolError`.
 """
 
 from __future__ import annotations
