@@ -1,22 +1,13 @@
 """StudioAgent — creative assistant for the multi-track studio.
 
-Unlike `VoiceAgent` (a daily conversational companion), the StudioAgent
-is a *task*-oriented assistant: it knows about the user's open project,
-its tracks, and the clips on each track, and can drive them via the
-`generate_speech`, `edit_audio`, and `call_mcp` tools.
+A task-oriented assistant (unlike the conversational `VoiceAgent`): it
+knows the user's open project, its tracks and clips, and drives them via
+`generate_speech`, `edit_audio`, and `call_mcp`.
 
-The agent is constructed per-request (per REST call or WS session) so
-it can be bound to:
-
-  * the active `project_id` (and the loaded project tree, so the
-    system prompt can describe the current studio state without an
-    extra DB round-trip per LLM call).
-  * the user's DB session, so `edit_audio` can write back to the
-    database via `studio_service.apply_edit`.
-
-The system prompt is rebuilt whenever the project state changes —
-call `refresh_project_context()` after edits to inject the latest
-snapshot.
+Constructed per-request so it binds to the active `project_id` (loading
+the project tree into the system prompt) and the user's DB session.
+`refresh_project_context()` rebuilds the prompt whenever project state
+changes.
 """
 
 from __future__ import annotations
