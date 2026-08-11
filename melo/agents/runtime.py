@@ -1,35 +1,14 @@
 """VoiceAgentRuntime — full-duplex voice conversation loop.
 
-Pipeline:
+Pipeline: VAD → ASR → LLM → TTS → audio out, with barge-in cancelling
+any in-flight stage the moment the user starts speaking.
 
-    VAD  ──▶  ASR  ──▶  LLM  ──▶  TTS  ──▶  audio out
-           │                                ▲
-           │ barge-in cancels ASR / LLM / TTS
-           └────────────────────────────────┘
+Providers resolve lazily through their plugin managers on first use;
+`RuntimeConfig.stub_llm=True` forces StubLLM for CI / dev. Barge-in is
+guarded by `min_speech_for_barge_ms` so short glitches don't abort turns.
 
-The runtime resolves ASR / TTS / LLM providers lazily through their
-respective plugin managers (`melo.voice.manager`, `melo.llm.manager`),
-so the configured provider is loaded on first use rather than at
-construction time. Set `RuntimeConfig.stub_llm=True` to force the
-StubLLM provider for CI / dev without API keys; otherwise the real
-LLM provider from `melo.config.settings.llm_provider` is used.
-
-Barge-in is the single most-important interaction primitive for a
-human-like voice agent. The runtime tracks an in-flight `_turn_task`
-(in addition to the legacy `_tts_task`) so any point of the pipeline
-(ASR / LLM / TTS) can be cancelled as soon as the user starts talking.
-Barge-in is guarded by a `min_speech_for_barge_ms` threshold so short
-glitches (cough, mic pop, background laugh) don't abort turns.
-
-Wire protocol produced by `RuntimeCallbacks`:
-
-    agent_state(listening | thinking | speaking)
-    asr_partial(text)
-    asr_final(text)
-    llm_chunk(text)
-    tts_chunk(bytes)
-    error(message)
-    interruption(reason)   ← fired when a turn is cancelled mid-flight
+`RuntimeCallbacks` emits the wire protocol: agent_state, asr_partial/
+final, llm_chunk, tts_chunk, error, interruption, planning.
 """
 
 from __future__ import annotations
@@ -44,6 +23,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Optional, 
 
 if TYPE_CHECKING:
     from melo.agents.memory import MemorySystem
+    from melo.agents.planner import Planner
     from melo.agents.tools.registry import ToolRegistry
 
 from melo.llm.base import (
@@ -65,9 +45,51 @@ from melo.voice.vad import VoiceActivityDetector
 logger = logging.getLogger(__name__)
 
 #: Regex matching an inline voice tool-call block. Non-greedy so the
-#: first closing `]]` terminates the block, mirroring the AgentToolLoop
-#: wire protocol so the voice channel and the studio share one format.
+#: first closing `]]` terminates the block, consistent with the
+#: AgentToolLoop wire protocol so the voice and studio channels share
+#: one format.
 _TOOL_CALL_RE = re.compile(r"\[\[tool_call:\s*(.+?)\]\]", flags=re.DOTALL)
+
+#: Matches a `${p<index>.<key>}` reference to an earlier plan step's
+#: output. `?P<ref>` is the full placeholder; `?P<idx>` and `?P<key>`
+#: capture the step position and the field to pull out of its result.
+_PLACEHOLDER_RE = re.compile(r"\$\{p(?P<idx>\d+)\.(?P<key>[a-zA-Z0-9_]+)\}")
+
+
+def _resolve_step_args(args: dict, step_results: list[dict]) -> dict:
+    """Replace `${p<i>.<key>}` placeholders in `args` using step results.
+
+    Lets a rule-based plan chain dependent steps without an LLM: e.g. a
+    step that creates a project can have a following step reference
+    `${p0.id}` to feed the returned project id into its own args. When
+    a referenced step is out of range or lacks the key, the placeholder
+    is left as-is so the tool receives a visible, fail-fast value rather
+    than a silent empty string.
+    """
+    if not step_results:
+        return args
+
+    def resolve(value: object) -> object:
+        if isinstance(value, str) and "{p" in value:
+            def _sub(match: re.Match) -> str:
+                idx = int(match.group("idx"))
+                key = match.group("key")
+                if idx < len(step_results) and isinstance(
+                    step_results[idx], dict
+                ):
+                    resolved = step_results[idx].get(key)
+                    if resolved is not None:
+                        return str(resolved)
+                return match.group(0)
+
+            return _PLACEHOLDER_RE.sub(_sub, value)
+        if isinstance(value, dict):
+            return {k: resolve(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [resolve(v) for v in value]
+        return value
+
+    return {k: resolve(v) for k, v in args.items()}
 
 
 class AgentState(str, Enum):
@@ -100,9 +122,15 @@ class RuntimeCallbacks(Protocol):
 
     async def on_tool_result(self, name: str, result: dict) -> None: ...
 
+    async def on_tool_retry(
+        self, name: str, attempt: int, max_retries: int, error: str
+    ) -> None: ...
+
     async def on_interruption(self, reason: str) -> None: ...
 
     async def on_voice_changed(self, voice_id: str) -> None: ...
+
+    async def on_planning(self, plan: dict) -> None: ...
 
 
 # Type aliases for clarity.
@@ -150,6 +178,14 @@ class RuntimeConfig:
     # frame size varies by the client, but 30 ms matches the 480-sample
     # @ 16 kHz PCM windows the test helpers use.
     barge_frame_ms: int = 30
+    # -- Stage 16: planner step -------------------------------------------
+    # When True, an explicit planner step runs BEFORE the LLM stream:
+    # the planner decomposes the user transcript into an ordered list
+    # of tool calls, the runtime executes each call upfront, and the
+    # collected results are injected into the LLM system prompt as
+    # context. Defaults to False so existing tests / sessions that
+    # don't attach a planner behave identically.
+    planner_enabled: bool = False
 
 
 @dataclass
@@ -200,12 +236,18 @@ class VoiceAgentRuntime:
         history: list[ChatMessage] | None = None,
         memory: MemorySystem | None = None,
         tools: Optional["ToolRegistry"] | None = None,
+        planner: Optional["Planner"] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._callbacks = callbacks
         self._config = config or RuntimeConfig()
         self._memory = memory
         self._tools = tools
+        self._planner = planner
+        # Stage 18: per-runtime tool allowlist. When set, the attached
+        # registry is filtered to these names so the runtime never
+        # executes a disallowed tool. None means no restriction.
+        self._tool_allowlist: set[str] | None = None
 
         # Resolve providers lazily through the manager so that an unset
         # ASR/TTS/LLM doesn't crash construction (only first-use matters).
@@ -240,8 +282,13 @@ class VoiceAgentRuntime:
         self._history: list[ChatMessage] = list(history or [])
         self._history_limit = 32
         # Cross-token buffer for stripping inline tool-call markers from
-        # the streaming LLM output (see `_filter_tool_markers`).
+        # the streaming LLM output (handled by `_filter_tool_markers`).
         self._tool_filter_buf = ""
+        # Per-turn state for tool-call streaming (Stage 22): calls are
+        # announced and executed as their markers close mid-stream, then
+        # awaited by `_finish_streamed_tools` once the stream ends.
+        self._stream_tool_calls: list[tuple[str, dict]] = []
+        self._stream_tool_tasks: list[asyncio.Task] = []
 
     # -- public API --------------------------------------------------------
 
@@ -318,8 +365,43 @@ class VoiceAgentRuntime:
         self._memory = memory
 
     def attach_tools(self, tools: "ToolRegistry") -> None:
-        """Attach a tool registry the LLM can invoke inline via tool_call."""
+        """Attach a tool registry the LLM can invoke inline via tool_call.
+
+        Stage 18: when a tool allowlist is active (set via
+        `set_tool_allowlist`), the registry is filtered to the allowed
+        names before being stored so the runtime never executes a
+        disallowed tool — neither via inline `[[tool_call]]` markers
+        nor via the planner step.
+        """
+        if self._tool_allowlist is not None:
+            tools = tools.filter(list(self._tool_allowlist))
         self._tools = tools
+
+    def set_tool_allowlist(self, names: list[str] | None) -> None:
+        """Stage 18: restrict which attached tools this runtime may invoke.
+
+        `names` is the list of tool names permitted for this runtime's
+        agent. None or an empty list clears the restriction so every
+        tool in the attached registry is callable. When a registry is
+        already attached, it is re-filtered immediately so the new
+        restriction takes effect for in-flight turns. A subsequent
+        `attach_tools()` call is also filtered through this allowlist.
+        """
+        self._tool_allowlist = set(names) if names else None
+        if self._tools is not None:
+            self._tools = self._tools.filter(names)
+
+    def attach_planner(self, planner: "Planner") -> None:
+        """Attach a planner whose `plan()` runs before each LLM stream.
+
+        Stage 16: when `RuntimeConfig.planner_enabled` is True and a
+        planner is attached, every turn first decomposes the user
+        transcript into an ordered list of tool calls, executes them
+        upfront, and feeds the collected results into the LLM system
+        prompt as context. Without this call the runtime behaves
+        identically to pre-Stage-16 releases.
+        """
+        self._planner = planner
 
     async def recall_for_turn(self, query: str, *, k: int = 3) -> list:
         """Retrieve long-term memory facts relevant to the current turn.
@@ -521,7 +603,16 @@ class VoiceAgentRuntime:
                 return
 
             await self._set_state(AgentState.THINKING)
-            llm_text = await self._run_llm(transcript)
+            # Stage 16: optional planner step runs BEFORE the LLM stream
+            # so the LLM final response can reason about real tool
+            # outputs rather than emit inline tool_call markers and wait
+            # for a second iteration. Returns "" when disabled / no
+            # planner attached / empty plan — keeps the path identical
+            # to pre-Stage-16 in those cases.
+            plan_context = await self._run_planner(transcript)
+            if self._turn_cancelled:
+                return
+            llm_text = await self._run_llm(transcript, plan_context=plan_context)
             if self._turn_cancelled:
                 return
 
@@ -560,19 +651,128 @@ class VoiceAgentRuntime:
                 final_text = partial
         return final_text.strip()
 
-    async def _run_llm(self, transcript: str) -> str:
+    async def _run_planner(self, transcript: str) -> str:
+        """Stage 16 planner step — runs BEFORE the LLM stream.
+
+        When `planner_enabled` is False or no planner is attached, this
+        is a no-op returning "" so the runtime behaves identically to
+        pre-Stage-16 releases. When enabled:
+
+          1. The planner decomposes `transcript` (+ history context)
+             into an ordered `Plan` of tool-call steps.
+          2. The plan is emitted via `on_planning(plan.to_dict())` so
+             the client can surface a transient "正在规划…" indicator.
+          3. Each plan step is executed in order against the attached
+             tool registry. Tool calls + results are surfaced via the
+             existing `on_tool_call` / `on_tool_result` callbacks so
+             clients show progress. Steps whose tool name is not in
+             the registry are skipped with an `ok:False` result so the
+             planner never silently no-ops.
+          4. Each step's result is summarised into a context string
+             that is returned for injection into the LLM system prompt,
+             letting the final response reason about real outputs.
+
+        Planner exceptions are logged and treated as an empty plan so a
+        broken planner never aborts the turn — the LLM still streams its
+        best-effort response without plan context.
+        """
+        if self._planner is None or not self._config.planner_enabled:
+            return ""
+        try:
+            plan = await self._planner.plan(
+                transcript, context=list(self._history)
+            )
+        except asyncio.CancelledError:
+            self._turn_cancelled = True
+            raise
+        except Exception as exc:
+            logger.warning("Planner raised; falling back to no-plan: %s", exc)
+            return ""
+        if self._turn_cancelled:
+            return ""
+        if plan.is_empty:
+            # Conversational turn — no planning event, no tool calls.
+            # The LLM streams its response as if no planner existed.
+            return ""
+        await self._emit_planning(plan.to_dict())
+
+        # Build the set of registered tool names once so unknown tools
+        # are skipped per-step without re-querying the registry.
+        available: set[str] = set()
+        if self._tools is not None:
+            try:
+                available = {t["name"] for t in self._tools.schemas()}
+            except Exception:  # pragma: no cover - defensive
+                available = set()
+
+        context_parts: list[str] = []
+        # Per-step results (keyed by position) so later steps can pull
+        # values out of earlier outputs via `${p<i>.<key>}` placeholders.
+        step_results: list[dict] = []
+        for index, step in enumerate(plan.steps):
+            if self._turn_cancelled:
+                break
+            await self._emit_tool_call(step.tool, step.args)
+            if step.tool not in available:
+                # Planner asked for a tool the runtime doesn't have —
+                # surface as a failed result so the client sees the
+                # mismatch rather than a silent skip.
+                result = {
+                    "ok": False,
+                    "error": f"tool not registered: {step.tool}",
+                }
+                await self._emit_tool_result(step.tool, result)
+                context_parts.append(
+                    f"[planned tool {step.tool}: NOT AVAILABLE]"
+                )
+                step_results.append(result)
+                continue
+            # Resolve references to earlier step outputs before running,
+            # enabling dependent orchestration (e.g. create a project,
+            # then add a track to the returned project id).
+            resolved_args = _resolve_step_args(step.args, step_results)
+            try:
+                raw = await self._tools.execute(
+                    step.tool,
+                    on_retry=self._exec_retry_listener,
+                    **resolved_args,
+                )
+            except asyncio.CancelledError:
+                self._turn_cancelled = True
+                raise
+            except Exception as exc:
+                raw = {"ok": False, "error": str(exc)}
+            if not isinstance(raw, dict) or "ok" not in raw:
+                raw = {"ok": True, "result": raw}
+            await self._emit_tool_result(step.tool, raw)
+            payload = json.dumps(raw, ensure_ascii=False)
+            context_parts.append(
+                f"[planned tool {step.tool}: {payload}]"
+            )
+            step_results.append(raw)
+        return "\n".join(context_parts)
+
+    async def _run_llm(self, transcript: str, *, plan_context: str = "") -> str:
         """Produce LLM response, emit llm_chunk events.
 
         Builds the chat messages from the conversation history + the new
         user transcript, streams tokens from the LLM provider, emits
         each token as `on_llm_chunk`, and (on a non-cancelled turn)
         accumulates the full text back into history.
+
+        `plan_context` (Stage 16) carries the pre-executed tool results
+        produced by `_run_planner`. When non-empty it is appended to the
+        system message so the LLM final response can reference real
+        tool outputs rather than re-issuing tool_call markers.
         """
         llm = self._resolve_llm()
         facts = await self.recall_for_turn(transcript)
         tool_prompt = self._build_tool_prompt()
         messages = self._build_messages(
-            transcript, memory_facts=facts, tool_prompt=tool_prompt
+            transcript,
+            memory_facts=facts,
+            tool_prompt=tool_prompt,
+            plan_context=plan_context,
         )
         options = LLMOptions(
             model=self._config.llm_model,
@@ -581,6 +781,11 @@ class VoiceAgentRuntime:
         )
 
         full_text_parts: list[str] = []
+        # Reset per-turn stream state so a leftover unclosed block or a
+        # previous turn's tool tasks never bleed into this turn.
+        self._tool_filter_buf = ""
+        self._stream_tool_calls = []
+        self._stream_tool_tasks = []
         try:
             async for token in llm.stream_chat(messages, options=options):
                 if self._turn_cancelled:
@@ -589,20 +794,26 @@ class VoiceAgentRuntime:
                     break
                 if not token:
                     continue
-                # Keep the raw token for parsing tool-call blocks, but emit a
-                # marker-free version so the client / TTS never speaks protocol.
+                # Keep the raw token for the final display text, but emit a
+                # marker-free version so the client / TTS never speaks
+                # protocol. Tool-call blocks are detected mid-stream and
+                # executed immediately (Stage 22) rather than waiting for
+                # the whole LLM response to finish.
                 full_text_parts.append(token)
-                await self._callbacks.on_llm_chunk(self._filter_tool_markers(token))
+                await self._callbacks.on_llm_chunk(
+                    self._filter_tool_markers(token, on_block=self._on_stream_block)
+                )
         except asyncio.CancelledError:
             self._turn_cancelled = True
+            self._cancel_stream_tools()
             raise
 
         if self._turn_cancelled:
+            self._cancel_stream_tools()
             return ""
         full_text = "".join(full_text_parts).strip()
-        tool_calls = self._parse_tool_calls(full_text)
-        if tool_calls:
-            llm_text = await self._execute_tools(full_text, tool_calls)
+        if self._stream_tool_calls:
+            llm_text = await self._finish_streamed_tools(full_text)
         else:
             llm_text = full_text
         # Persist the turn into history so the next turn sees context.
@@ -621,6 +832,7 @@ class VoiceAgentRuntime:
         *,
         memory_facts: list | None = None,
         tool_prompt: str | None = None,
+        plan_context: str = "",
     ) -> list[ChatMessage]:
         """Assemble the message list for the LLM call.
 
@@ -632,6 +844,9 @@ class VoiceAgentRuntime:
         remains intact and recall is folded in as supplementary context.
         A `tool_prompt` (when present) is appended after the memory block
         so the LLM knows it may emit inline tool-call blocks.
+        `plan_context` (Stage 16) is appended last as the planner's
+        pre-executed tool outputs, so the LLM final response can reason
+        about real results rather than re-issuing tool_call markers.
         """
         sys = self._config.system_prompt
         if memory_facts:
@@ -643,6 +858,8 @@ class VoiceAgentRuntime:
             sys = f"{sys}\n\n{recall}" if sys else recall
         if tool_prompt:
             sys = f"{sys}\n\n{tool_prompt}" if sys else tool_prompt
+        if plan_context:
+            sys = f"{sys}\n\n{plan_context}" if sys else plan_context
 
         msgs: list[ChatMessage] = []
         if sys:
@@ -793,6 +1010,23 @@ class VoiceAgentRuntime:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("on_voice_changed callback failed: %s", exc)
 
+    async def _emit_planning(self, plan: dict) -> None:
+        """Fire the planning callback so clients can surface a transient
+        "正在规划…" indicator above the transcript.
+
+        Uses getattr so older callback implementations (pre-Stage-16)
+        that don't implement `on_planning` keep working.
+        """
+        if self._callbacks is None:
+            return
+        cb = getattr(self._callbacks, "on_planning", None)
+        if cb is None:
+            return
+        try:
+            await cb(plan)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_planning callback failed: %s", exc)
+
     # -- inline tool-call support -----------------------------------------
 
     def _build_tool_prompt(self) -> str | None:
@@ -845,7 +1079,7 @@ class VoiceAgentRuntime:
         """Remove all inline tool-call blocks, leaving readable text."""
         return _TOOL_CALL_RE.sub("", text)
 
-    def _filter_tool_markers(self, token: str) -> str:
+    def _filter_tool_markers(self, token: str, *, on_block=None) -> str:
         """Strip inline tool-call markers from a streaming token.
 
         Tool-call blocks can be split across arbitrary token boundaries,
@@ -854,20 +1088,29 @@ class VoiceAgentRuntime:
         dropped. A block that opens and closes within one token is
         handled inline, and the tail after a closing marker is itself
         re-scanned in case it opens another block.
+
+        When `on_block` is supplied it is called with each completed
+        block body ('tool_call: {...}') so callers can act on a tool as
+        soon as its marker closes — this is what enables tool-call
+        streaming in `_run_llm`.
         """
         if self._tool_filter_buf:
             # Mid-block: keep buffering until the closing marker.
             self._tool_filter_buf += token
             if "]]" in self._tool_filter_buf:
-                tail = self._tool_filter_buf.split("]]", 1)[1]
+                block, tail = self._tool_filter_buf.split("]]", 1)
                 self._tool_filter_buf = ""
-                return self._filter_tool_markers(tail)
+                if on_block:
+                    on_block(block)
+                return self._filter_tool_markers(tail, on_block=on_block)
             return ""
         if "[[" in token:
             head, rest = token.split("[[", 1)
             if "]]" in rest:
-                tail = rest.split("]]", 1)[1]
-                return head + self._filter_tool_markers(tail)
+                block, tail = rest.split("]]", 1)
+                if on_block:
+                    on_block(block)
+                return head + self._filter_tool_markers(tail, on_block=on_block)
             # Opening marker not closed in this token — buffer the rest.
             self._tool_filter_buf = rest
             return head
@@ -889,6 +1132,24 @@ class VoiceAgentRuntime:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("on_tool_result callback failed: %s", exc)
 
+    async def _emit_tool_retry(
+        self, name: str, attempt: int, max_retries: int, error: str
+    ) -> None:
+        """Surface a tool re-attempt so clients can show retry progress.
+
+        Uses getattr so callback implementations that predate Stage 23
+        (no `on_tool_retry`) keep working without a change.
+        """
+        if self._callbacks is None:
+            return
+        cb = getattr(self._callbacks, "on_tool_retry", None)
+        if cb is None:
+            return
+        try:
+            await cb(name, attempt, max_retries, error)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("on_tool_retry callback failed: %s", exc)
+
     async def _execute_tools(
         self, full_text: str, tool_calls: list[tuple[str, dict]]
     ) -> str:
@@ -898,32 +1159,178 @@ class VoiceAgentRuntime:
         the model emitted only tool calls (no plain text), a short
         confirmation is synthesised from the tool results so the TTS
         still has something to say.
+
+        Tool calls are executed in parallel via `asyncio.gather` so
+        independent calls don't serialize. All `on_tool_call` events are
+        emitted up-front (so the client can render pending indicators
+        for every call without waiting), then `on_tool_result` streams
+        as each call completes. Confirmations are reassembled in the
+        original call order so the summary stays coherent. Cancellation
+        (barge-in) propagates through gather to all in-flight tool tasks.
+
+        This batch path is used when the full call list is already known
+        (direct dispatch); the live-streaming path (`_on_stream_block`)
+        executes calls as their markers close mid-stream. Both share
+        `_exec_core` so execution semantics stay identical.
         """
         display_text = self._strip_tool_calls(full_text).strip()
         if self._tools is None:
             # No registry attached — just surface the readable text.
             return display_text
 
-        confirmations: list[str] = []
+        # Emit every tool-call event up-front so clients can show all
+        # pending calls immediately rather than waiting for each to
+        # finish before the next is announced.
         for name, args in tool_calls:
             await self._emit_tool_call(name, args)
-            try:
-                result = await self._tools.execute(name, **args)
-            except Exception as exc:
-                result = {"ok": False, "error": str(exc)}
-            if not isinstance(result, dict) or "ok" not in result:
-                result = {"ok": True, "result": result}
-            await self._emit_tool_result(name, result)
-            confirmations.append(self._summarize_tool_result(name, result))
+
+        async def _run_ordered(idx: int, name: str, args: dict) -> tuple[int, dict]:
+            raw = await self._exec_core(name, args)
+            return idx, raw
+
+        # All calls are independent (no inter-call dependencies yet),
+        # so gather runs them concurrently. If any raises CancelledError
+        # (barge-in), gather cancels the rest and re-raises so the turn
+        # task unwinds cleanly.
+        pairs = await asyncio.gather(
+            *(_run_ordered(i, name, args) for i, (name, args) in enumerate(tool_calls))
+        )
+
+        # Reassemble confirmations in the ORIGINAL call order so the
+        # spoken summary is deterministic and matches the call sequence
+        # the client saw via on_tool_call.
+        results_by_idx = dict(pairs)
+        confirmations = [
+            self._summarize_tool_result(name, results_by_idx[i])
+            for i, (name, _args) in enumerate(tool_calls)
+        ]
 
         if display_text:
             return display_text
         return " ".join(confirmations)
 
+    def _parse_single_tool_block(self, block: str) -> tuple[str, dict] | None:
+        """Parse one completed 'tool_call: {...}' block into (name, args).
+
+        Returns None for a malformed block so a bad emission can't abort
+        the turn — the same tolerance as `_parse_tool_calls`.
+        """
+        marker = "tool_call:"
+        pos = block.find(marker)
+        if pos == -1:
+            return None
+        try:
+            data = json.loads(block[pos + len(marker):].strip())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        name = data.get("tool")
+        if not name:
+            return None
+        args = data.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        return name, args
+
+    def _on_stream_block(self, block: str) -> None:
+        """Mid-stream hook — a tool-call block just closed.
+
+        Records the call in order and launches its execution immediately
+        so the tool runs while the LLM is still generating the rest of
+        its response, rather than waiting for the full stream. Tasks are
+        fire-and-forget here; `_finish_streamed_tools` awaits them after
+        the stream ends so the turn completes with every result in hand.
+        """
+        parsed = self._parse_single_tool_block(block)
+        if parsed is None:
+            return
+        name, args = parsed
+        idx = len(self._stream_tool_calls)
+        self._stream_tool_calls.append((name, args))
+        if self._tools is None:
+            return
+        task = asyncio.create_task(self._exec_one_stream(idx, name, args))
+        self._stream_tool_tasks.append(task)
+
+    async def _exec_one_stream(
+        self, idx: int, name: str, args: dict
+    ) -> tuple[int, dict]:
+        """Streaming execution: announce the call, run it, stream result."""
+        await self._emit_tool_call(name, args)
+        raw = await self._exec_core(name, args)
+        return idx, raw
+
+    async def _exec_retry_listener(
+        self, name: str, attempt: int, max_retries: int, error: str
+    ) -> None:
+        """Stage 23: bridge registry retry progress to the wire protocol."""
+        await self._emit_tool_retry(name, attempt, max_retries, error)
+
+    async def _exec_core(self, name: str, args: dict) -> dict:
+        """Execute one tool and produce its wire result (never raises).
+
+        Failure retry (Stage 23) runs inside the registry's `execute`:
+        tools declaring `retry > 0` are re-attempted with exponential
+        backoff, and each re-attempt is surfaced via `on_tool_retry`.
+        A tool that still fails after all attempts yields an `ok:False`
+        result so the turn degrades gracefully instead of aborting.
+        """
+        try:
+            raw = await self._tools.execute(
+                name, on_retry=self._exec_retry_listener, **args
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raw = {"ok": False, "error": str(exc)}
+        if not isinstance(raw, dict) or "ok" not in raw:
+            raw = {"ok": True, "result": raw}
+        # Stream the result as soon as this call completes — clients
+        # receive results in completion order, not submission order.
+        await self._emit_tool_result(name, raw)
+        return raw
+
+    async def _finish_streamed_tools(self, full_text: str) -> str:
+        """Await tools launched mid-stream and build the spoken text.
+
+        Reassembles confirmations in the order the calls were announced
+        (call order), and keeps the readable text when the model emitted
+        any. Falls back to the raw text when no tools were scheduled.
+        """
+        display_text = self._strip_tool_calls(full_text).strip()
+        if not self._stream_tool_tasks:
+            return display_text or full_text
+        pairs = await asyncio.gather(*self._stream_tool_tasks)
+        results_by_idx = dict(pairs)
+        confirmations = [
+            self._summarize_tool_result(name, results_by_idx[i])
+            for i, (name, _args) in enumerate(self._stream_tool_calls)
+        ]
+        if display_text:
+            return display_text
+        return " ".join(confirmations)
+
+    def _cancel_stream_tools(self) -> None:
+        """Cancel any tool tasks still running when a turn is aborted."""
+        for task in self._stream_tool_tasks:
+            if not task.done():
+                task.cancel()
+
     @staticmethod
     def _summarize_tool_result(name: str, result: dict) -> str:
-        """Build a short spoken confirmation from a tool result."""
+        """Build a short spoken confirmation from a tool result.
+
+        Stage 23 error fallback: an `ok:False` result is spoken as a
+        graceful failure notice (with the error text when present) so
+        the turn degrades honestly instead of claiming success.
+        """
         if isinstance(result, dict):
+            if result.get("ok") is False:
+                error = result.get("error")
+                if error:
+                    return f"[工具 {name} 执行失败: {error}]"
+                return f"[工具 {name} 执行失败]"
             for key in ("message", "text", "name", "status"):
                 val = result.get(key)
                 if isinstance(val, str) and val:
