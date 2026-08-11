@@ -83,6 +83,72 @@ class RuleBasedPlanner:
         # user drive the editor by speaking. Single-step plans cover
         # self-contained actions; dependent flows (create → track → clip)
         # are orchestrated by the LLM via inline [[tool_call]] blocks.
+        # Multi-step studio orchestration: create a project AND add a
+        # track to it in one request. The second step references the
+        # first step's returned project id via `${p0.id}` — dependency
+        # resolution in the runtime wires the two together. Must run
+        # BEFORE the single-step "create project" check below.
+        if "create" in text and "project" in text and (
+            "track" in text or "音轨" in text
+        ):
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "create_project", "name": request},
+                        description="Create a new studio project",
+                    ),
+                    PlanStep(
+                        tool="studio_ops",
+                        args={
+                            "action": "add_track",
+                            "project_id": "${p0.id}",
+                            "name": "voice-track",
+                        },
+                        description="Add a voice track to the new project",
+                    ),
+                ],
+            )
+        # Full studio pipeline: create project → add track → add a clip →
+        # generate speech for it. Each step pulls the id the previous one
+        # returned, so a single spoken sentence builds a real project.
+        if "create" in text and "project" in text and (
+            "clip" in text or "片段" in text or "配音" in text
+        ):
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "create_project", "name": request},
+                        description="Create a new studio project",
+                    ),
+                    PlanStep(
+                        tool="studio_ops",
+                        args={
+                            "action": "add_track",
+                            "project_id": "${p0.id}",
+                            "name": "voice-track",
+                        },
+                        description="Add a voice track to the new project",
+                    ),
+                    PlanStep(
+                        tool="studio_ops",
+                        args={
+                            "action": "add_clip",
+                            "track_id": "${p1.id}",
+                            "text": "Hello from Melo",
+                        },
+                        description="Add a clip to the track",
+                    ),
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "generate_clip", "clip_id": "${p2.id}"},
+                        description="Generate speech for the clip",
+                    ),
+                ],
+            )
         if any(k in text for k in ("create project", "make a project", "new project")):
             return Plan(
                 goal=request,
@@ -113,6 +179,17 @@ class RuleBasedPlanner:
                         tool="voice_control",
                         args={"action": "set", "voice_id": ""},
                         description="Switch the agent's speaking voice",
+                    )
+                ],
+            )
+        if ("voices" in text or "library" in text) and "voice" in text:
+            return Plan(
+                goal=request,
+                steps=[
+                    PlanStep(
+                        tool="studio_ops",
+                        args={"action": "list_voices"},
+                        description="List the user's voice library",
                     )
                 ],
             )
