@@ -35,10 +35,30 @@ interface ChatMessage extends TranscriptEntry {
   ok?: boolean
 }
 
+/** A tool call the agent performed during the current turn. */
+interface ToolStep {
+  key: string
+  name: string
+  ok: boolean
+  detail: string
+  retry?: string
+}
+
 let uidCounter = 0
 function nextId(): string {
   uidCounter += 1
   return `studio-msg-${uidCounter}`
+}
+
+function ToolStepGlyph({ ok, retry }: { ok: boolean; retry?: string }) {
+  if (retry) {
+    return <span aria-hidden className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-amber-400" />
+  }
+  return (
+    <span aria-hidden className={ok ? 'font-bold text-[var(--c-mint)]' : 'font-bold text-red-400'}>
+      {ok ? '✓' : '✗'}
+    </span>
+  )
 }
 
 export function StudioChatPanel({
@@ -51,6 +71,9 @@ export function StudioChatPanel({
   const [streamText, setStreamText] = useState('')
   const [input, setInput] = useState('')
   const [agentName, setAgentName] = useState<string | null>(null)
+  // Orchestration rail — the tool calls the agent performed during the
+  // current turn, shown as a compact step sequence above the transcript.
+  const [toolSteps, setToolSteps] = useState<ToolStep[]>([])
 
   const currentProjectId = useStudioStore((s) => s.currentProject?.id)
 
@@ -79,16 +102,52 @@ export function StudioChatPanel({
 
       case 'tool_call': {
         const ok = (e.result as { ok?: boolean } | undefined)?.ok === true
-        const label = ok ? '✓' : '✗'
+        const label = e.name ?? '未知'
         const detail = summarizeToolResult(e.result)
-        const text = `${label} 工具「${e.name ?? '未知'}」${ok ? '执行成功' : '执行失败'}${detail ? ` — ${detail}` : ''}`
+        const text = `${ok ? '✓' : '✗'} 工具「${label}」${ok ? '执行成功' : '执行失败'}${detail ? ` — ${detail}` : ''}`
         setMessages((prev) => [
           ...prev,
           { id: nextId(), role: 'system', text, ts: Date.now(), toolName: e.name, ok },
         ])
+        // Record the step on the orchestration rail for this turn.
+        setToolSteps((prev) => [
+          ...prev,
+          { key: nextId(), name: label, ok, detail },
+        ])
         // A successful tool may have mutated the workspace — let the parent
         // refresh the store so the change lands on the timeline immediately.
         if (ok) onToolAppliedRef.current()
+        break
+      }
+
+      case 'tool_retry': {
+        // Stage 23: a tool failed transiently and the registry is
+        // re-attempting it with backoff. Surface the progress so the
+        // user sees the agent recovering rather than hanging.
+        const label = e.name ?? '未知'
+        const progress =
+          e.max_retries != null ? ` ${e.attempt}/${e.max_retries}` : ''
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextId(),
+            role: 'system',
+            text: `↻ 正在重试「${label}」${progress}…`,
+            ts: Date.now(),
+            ok: undefined,
+          },
+        ])
+        // Mark the newest still-open step as retrying on the rail.
+        setToolSteps((prev) => {
+          const last = prev.length - 1
+          if (last < 0) return prev
+          const next = [...prev]
+          next[last] = {
+            ...next[last],
+            retry: `${e.attempt}${e.max_retries != null ? `/${e.max_retries}` : ''}`,
+          }
+          return next
+        })
         break
       }
 
@@ -138,6 +197,7 @@ export function StudioChatPanel({
     pendingRef.current = ''
     setStreamText('')
     setInput('')
+    setToolSteps([])
     sendChat(text, currentProjectId)
   }, [input, connected, sendChat, currentProjectId])
 
@@ -206,6 +266,30 @@ export function StudioChatPanel({
           «
         </button>
       </div>
+
+      {/* Orchestration rail — the tool calls the agent performed during
+          the current turn, as a compact step sequence. */}
+      {toolSteps.length > 0 && (
+        <div className="space-y-1 border-b border-[var(--border)] px-4 py-2" role="status" aria-live="polite">
+          {toolSteps.map((step) => (
+            <div
+              key={step.key}
+              className="flex items-center gap-2 rounded-lg bg-[var(--card)]/60 px-2.5 py-1 text-xs shadow-[var(--shadow-soft)]"
+            >
+              <ToolStepGlyph ok={step.ok} retry={step.retry} />
+              <span className="font-medium text-[var(--fg)]">{step.name}</span>
+              {step.detail && (
+                <span className="truncate text-[var(--muted)]">{step.detail}</span>
+              )}
+              {step.retry && (
+                <span className="ml-auto shrink-0 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+                  重试 {step.retry}…
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Transcript + live stream */}
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
