@@ -114,6 +114,22 @@ export function SettingsRoute() {
               label="Deepgram API Key"
               value={<StatusDot ok={settings.voice.has_deepgram_key} label={settings.voice.has_deepgram_key ? '已配置' : '未配置'} />}
             />
+            <Row
+              label="Voicebox Endpoint"
+              value={
+                <StatusDot
+                  ok={settings.voice.has_voicebox_endpoint}
+                  label={settings.voice.has_voicebox_endpoint ? '已配置' : '未配置'}
+                />
+              }
+            />
+            {settings.voice.has_voicebox_endpoint && (
+              <>
+                <Row label="Voicebox Base URL" value={settings.voice.voicebox_base_url} />
+                <Row label="Voicebox 默认声音" value={settings.voice.voicebox_default_voice} />
+                <Row label="Voicebox 模型" value={settings.voice.voicebox_model} />
+              </>
+            )}
           </Card>
 
           <Card title="WebSocket 语音通道">
