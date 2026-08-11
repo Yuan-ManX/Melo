@@ -1,17 +1,12 @@
-"""Memory tools — let the agent read and write its long-term memory.
+"""Memory tools — read and write the agent's long-term memory.
 
-The agentic tool loop gives the LLM two new levers over its own
-three-tier memory system:
+Gives the tool loop two levers over the three-tier memory system:
 
-  * `recall_memory` — pull relevant facts back out of long-term storage
-    so the model can ground its answer in what it already knows.
-  * `remember` — persist a new fact so it survives across turns and
-    sessions.
+  * `recall_memory` — pull relevant facts back from long-term storage
+  * `remember`      — persist a fact across turns and sessions
 
-Both tools are bound to a `MemorySystem` at construction time. When
-constructed without one (e.g. by the shared default registry), they
-raise a clear `ToolError` on first use so the caller knows to bind a
-memory instance — mirroring how `edit_audio` handles its DB session.
+Both are bound to a `MemorySystem`; without one they raise `ToolError`
+on first use so the caller knows to bind a memory instance.
 """
 
 from __future__ import annotations
