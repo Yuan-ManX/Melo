@@ -1,12 +1,11 @@
 """call_mcp tool — generic MCP (Model Context Protocol) server connector.
 
-MCP servers expose tools / resources / prompts via JSON-RPC. This
-tool is a thin client: given a server URL + method + params, it issues
-a JSON-RPC call and returns the result.
+MCP servers expose tools / resources / prompts via JSON-RPC. This tool
+is a thin client: given a server URL + method + params, it issues a
+JSON-RPC call and returns the result.
 
-Melo ships a minimal HTTP-based transport. A STDIO transport for
-local MCP servers (filesystem, shell, browser) implements the same
-surface for process-local integrations.
+Melo ships an HTTP-based transport; a STDIO transport implements the
+same surface for process-local servers.
 """
 
 from __future__ import annotations
