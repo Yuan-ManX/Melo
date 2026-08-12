@@ -1,20 +1,14 @@
 """BaseAgent — abstract base class for Melo agents.
 
-An `Agent` is the *personality + configuration* layer that sits on top
-of the `VoiceAgentRuntime` (the *transport* layer). It owns:
-
-  * `system_prompt` — personality / persona instructions
-  * `llm_options` — model / temperature / token budget
-  * `memory` — three-tier memory system (short / working / long)
-  * `tools` — tool registry this agent is allowed to invoke
+An `Agent` is the personality + configuration layer on top of the
+`VoiceAgentRuntime` (the transport layer). It owns the system prompt,
+LLM options, the three-tier memory system, and the tool registry the
+agent may invoke.
 
 Subclasses (VoiceAgent, StudioAgent, BuilderAgent) override
-`build_system_prompt()` to inject persona-specific instructions, and
-optionally override `wire_runtime()` to attach extra hooks.
-
-The runtime itself is agnostic to agent identity — `BaseAgent`
-configures a runtime and hands it back to the caller (typically the
-WebSocket handler). This keeps the runtime reusable for tests.
+`build_system_prompt()` and optionally `wire_runtime()`.
+`configure_runtime()` applies config to a runtime and hands it back to
+the caller, keeping the runtime reusable for tests.
 """
 
 from __future__ import annotations
@@ -42,6 +36,12 @@ class AgentConfig:
     voice_id: str | None = None
     llm_options: LLMOptions = field(default_factory=LLMOptions)
     history_limit: int = 32
+    # Stage 18: per-agent tool allowlist. None means no restriction —
+    # every tool in the attached registry is callable. When set, the
+    # runtime filters the attached registry down to these names so an
+    # agent can only wield its permitted tools. Useful for giving
+    # distinct agents different capabilities from a shared registry.
+    allowed_tools: list[str] | None = None
 
 
 class BaseAgent(ABC):
@@ -84,6 +84,11 @@ class BaseAgent(ABC):
         runtime._config.llm_model = self.config.llm_options.model
         runtime._config.llm_temperature = self.config.llm_options.temperature
         runtime._config.llm_max_tokens = self.config.llm_options.max_tokens
+        # Stage 18: apply the per-agent tool allowlist so the runtime
+        # only executes tools this agent is permitted to call. Stored
+        # on the runtime so a later attach_tools() call is filtered too
+        # (the WS route attaches tools after the agent is bound).
+        runtime.set_tool_allowlist(self.config.allowed_tools)
 
     def make_runtime_config(self) -> RuntimeConfig:
         """Build a RuntimeConfig reflecting this agent's settings."""
@@ -119,6 +124,15 @@ class BaseAgent(ABC):
             temperature=float(llm_cfg.get("temperature", 0.7)),
             max_tokens=llm_cfg.get("max_tokens"),
         )
+        # Stage 21: the per-agent tool allowlist lives in the persisted
+        # `llm_config` JSON (no schema migration). A non-empty list of
+        # tool names restricts the agent to those tools; anything else
+        # (missing / empty / non-list) means "no restriction".
+        allowed = llm_cfg.get("allowed_tools")
+        if isinstance(allowed, list) and allowed:
+            allowed_tools = [str(t) for t in allowed]
+        else:
+            allowed_tools = None
         config = AgentConfig(
             name=row.name,
             persona=getattr(row, "persona", "") or "",
@@ -126,5 +140,6 @@ class BaseAgent(ABC):
             voice_id=getattr(row, "voice_id", None),
             llm_options=options,
             history_limit=llm_cfg.get("history_limit") or 32,
+            allowed_tools=allowed_tools,
         )
         return target_cls(config=config)
