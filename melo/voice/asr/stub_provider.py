@@ -1,12 +1,9 @@
 """Stub ASR provider — zero-dependency dev/test fallback.
 
-Echoes a canned phrase so the rest of the pipeline (VAD → ASR → LLM →
-TTS → WS transport) can be exercised end-to-end without any ASR
-dependencies installed. The "transcript" is deterministic per text
-input hash so test assertions can be made stable.
-
-Activate by setting `ASR_PROVIDER=stub` in `.env` (or registering
-directly via `VoicePluginManager.register_asr("stub", StubASR())`).
+Echoes a canned phrase so the whole pipeline (VAD → ASR → LLM → TTS →
+WS transport) works end-to-end without any ASR deps. The "transcript"
+is deterministic per input-text hash so tests can assert stably.
+Activate via `ASR_PROVIDER=stub` in `.env` or by registering directly.
 """
 
 from __future__ import annotations
