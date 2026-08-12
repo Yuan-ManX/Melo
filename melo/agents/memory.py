@@ -1,14 +1,13 @@
-"""Melo three-tier memory system — voice-agent native memory architecture.
+"""Melo three-tier memory system — voice-agent native memory.
 
-  * `short_term` — sliding window of recent chat messages (in-memory).
-  * `working`    — scratch state for the current task (in-memory dict).
+  * `short_term` — sliding window of recent chat messages (in-memory)
+  * `working`    — scratch state for the current task (in-memory dict)
   * `long_term`  — cross-session facts persisted to the DB + optional
-                   vector index for semantic recall.
+                   vector index for semantic recall
 
-All three tiers share a uniform interface. The `LongTermStore`
-abstraction decouples call sites from the storage backend — the
-in-memory substring matcher, Postgres + pgvector, and standalone
-vector stores all implement the same surface, selectable per
+All tiers share a uniform interface. The `LongTermStore` abstraction
+decouples call sites from the storage backend (in-memory matcher,
+Postgres + pgvector, standalone vector stores), selectable per
 deployment.
 """
 
